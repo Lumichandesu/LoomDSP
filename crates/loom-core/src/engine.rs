@@ -246,7 +246,10 @@ impl Engine {
                 }
                 Command::SwapSchedule(mut schedule) => {
                     schedule.take_tap_state_from(&self.schedule);
-                    schedule.take_smooth_state_from(&self.schedule);
+                    let slots = &self.slots;
+                    schedule.take_smooth_state_from(&self.schedule, |slot, param| {
+                        slots[slot].as_ref().and_then(|module| module.param_glide(param))
+                    });
                     let old = std::mem::replace(&mut self.schedule, schedule);
                     self.discard(Garbage::Schedule(old));
                     self.stats.schedule_swaps.fetch_add(1, Ordering::Relaxed);

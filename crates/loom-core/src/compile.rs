@@ -232,18 +232,28 @@ impl Schedule {
     }
 
     /// Copies in-flight base smoothing onto the new schedule, matched by key.
+    /// A fill that is new, because its parameter just got its first
+    /// assignment, starts from `glide(slot, param)` instead: the value the
+    /// module itself was gliding through, so the parameter does not step.
     /// Runs on the audio thread: no allocation.
-    pub fn take_smooth_state_from(&mut self, old: &Schedule) {
+    pub fn take_smooth_state_from(&mut self, old: &Schedule, glide: impl Fn(usize, usize) -> Option<f32>) {
         for fill in &mut self.fills {
             let Some(smooth) = fill.smooth.as_mut() else {
                 continue;
             };
-            for previous in &old.fills {
-                if previous.key == fill.key
-                    && let Some(previous) = previous.smooth
-                {
-                    *smooth = previous;
-                    break;
+            let previous = old
+                .fills
+                .iter()
+                .find(|previous| previous.key == fill.key)
+                .map(|previous| previous.smooth);
+            match previous {
+                Some(Some(previous)) => *smooth = previous,
+                Some(None) => {}
+                None => {
+                    if let Some(value) = glide(fill.slot as usize, usize::from(fill.param)) {
+                        smooth.reset(fill.spec.normalize(value));
+                        smooth.set_target(fill.spec.normalize(fill.base));
+                    }
                 }
             }
         }

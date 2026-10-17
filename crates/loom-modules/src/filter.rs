@@ -167,6 +167,16 @@ impl Module for Svf {
         }
     }
 
+    fn param_glide(&self, index: usize) -> Option<f32> {
+        match index {
+            // The cutoff glides in pitch. The engine glides in the knob's
+            // position, which is also logarithmic, so the paths match.
+            0 => self.cutoff.gliding().map(pitch::to_hz),
+            1 => self.resonance.gliding(),
+            _ => None,
+        }
+    }
+
     fn reset(&mut self) {
         self.ic1 = 0.0;
         self.ic2 = 0.0;

@@ -25,6 +25,20 @@ pub trait Module: Send {
         let _ = (index, value);
     }
 
+    /// The value parameter `index` has right now, in the parameter's units,
+    /// while the module is still gliding toward the value from
+    /// [`Module::set_param`]. `None` when it is not gliding, or when the
+    /// module does not smooth that parameter.
+    ///
+    /// When the first assignment on a smoothed parameter is added, the
+    /// engine starts its own glide from this value, so the sound does not
+    /// step to the target (modulation spec, rule 9). Called on the audio
+    /// thread, so the rules for `process` apply.
+    fn param_glide(&self, index: usize) -> Option<f32> {
+        let _ = index;
+        None
+    }
+
     /// Clears internal state (envelopes, filter memory, oscillator phase).
     fn reset(&mut self) {}
 

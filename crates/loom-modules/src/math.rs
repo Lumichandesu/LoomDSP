@@ -86,6 +86,10 @@ impl Module for Add {
             self.offset.set_target(value);
         }
     }
+
+    fn param_glide(&self, index: usize) -> Option<f32> {
+        if index == 0 { self.offset.gliding() } else { None }
+    }
 }
 
 /// `loom.math.mul`: `a * b * gain`. An unconnected `b` counts as 1.
@@ -167,6 +171,10 @@ impl Module for Mul {
             self.gain.set_target(value);
         }
     }
+
+    fn param_glide(&self, index: usize) -> Option<f32> {
+        if index == 0 { self.gain.gliding() } else { None }
+    }
 }
 
 /// `loom.math.constant`: a fixed value, set by a parameter.
@@ -227,6 +235,10 @@ impl Module for Constant {
         if index == 0 {
             self.value.set_target(value);
         }
+    }
+
+    fn param_glide(&self, index: usize) -> Option<f32> {
+        if index == 0 { self.value.gliding() } else { None }
     }
 
     fn reset(&mut self) {

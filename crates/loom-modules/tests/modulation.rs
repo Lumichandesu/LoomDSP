@@ -571,3 +571,56 @@ fn cable_cycle_is_broken_before_an_assignment_that_needs_no_delay() {
     assert_eq!(delays[0].1.module, first, "the cable into the first add is delayed");
     assert_eq!(report.inserted_assignment_delays().count(), 0);
 }
+
+/// Turns a knob, then adds its first assignment halfway through the glide.
+/// The depth is 0, so the output must follow the same glide as with no
+/// assignment, instead of stepping to the new value (review on #133).
+fn glide_with_depth_zero(
+    kind: &str,
+    param: &str,
+    from: f32,
+    to: f32,
+    output: &str,
+    setup: impl Fn(&mut Rig),
+    assign: bool,
+) -> Vec<f32> {
+    let mut rig = Rig::new(kind, &[(param, from)]);
+    setup(&mut rig);
+    rig.listen(output, output);
+    rig.render(256);
+    rig.parts.controller.set_param_named(rig.sink, param, to).unwrap();
+    let mut out = rig.render(64).0;
+    if assign {
+        rig.assign(param, 0.0);
+    }
+    rig.parts.controller.commit().unwrap();
+    out.extend(rig.render(1_024).0);
+    out
+}
+
+fn assert_close(got: &[f32], expected: &[f32], tolerance: f32) {
+    assert_eq!(got.len(), expected.len());
+    for (frame, (g, e)) in got.iter().zip(expected).enumerate() {
+        assert!((g - e).abs() <= tolerance, "frame {frame}: {g} vs {e}");
+    }
+}
+
+#[test]
+fn depth_zero_added_during_a_glide_continues_the_glide() {
+    let run = |assign| glide_with_depth_zero("loom.math.constant", "value", 0.0, 1.0, "out", |_| {}, assign);
+    let without = run(false);
+    let with = run(true);
+    // Still gliding when the assignment arrives, so a step would show.
+    assert!(without[64] < 0.9, "{}", without[64]);
+    assert_close(&with, &without, 1e-5);
+
+    let noise = |rig: &mut Rig| {
+        let noise = rig.parts.controller.add_module("loom.osc.noise").unwrap();
+        rig.parts
+            .controller
+            .connect_named(noise, "out", rig.sink, "in")
+            .unwrap();
+    };
+    let run = |assign| glide_with_depth_zero("loom.filter.svf", "cutoff", 200.0, 8_000.0, "lowpass", noise, assign);
+    assert_close(&run(true), &run(false), 1e-4);
+}

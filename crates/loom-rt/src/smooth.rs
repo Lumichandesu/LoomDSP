@@ -61,6 +61,13 @@ impl Smoothed {
         self.target + self.distance
     }
 
+    /// The current value while it is still moving toward the target.
+    /// `None` once it has settled.
+    #[inline]
+    pub fn gliding(&self) -> Option<f32> {
+        (self.distance != 0.0).then(|| self.current())
+    }
+
     /// Advances one sample and returns the new value.
     #[inline]
     pub fn tick(&mut self) -> f32 {
