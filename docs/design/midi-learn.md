@@ -8,7 +8,7 @@ How a performer links a hardware knob or fader to any parameter in a few seconds
 - **Use case and requirements:** [UC3, perform live](../product/personas-and-use-cases.md#uc3-perform-live-tomas-highest-priority-use-case), FR-MIDI-02. Related, not built here: FR-MIDI-06 (per-device mappings), FR-MIDI-09 (pickup, relative encoders, scaling).
 - **Background:** [parameter mapping](modulation.md#parameter-mapping) (value to position and back).
 - **Prior art:** most DAWs and software modular tools have a "learn" gesture: arm a control, move a hardware control, and the two are linked. We use the idea, in our own words.
-- **Issues:** [#24](https://github.com/brylie/LoomDSP/issues/24).
+- **Issues:** [#24](https://github.com/brylie/LoomDSP/issues/24), [#164](https://github.com/brylie/LoomDSP/issues/164) (remaining acceptance checks).
 - **Code:** `crates/loom-core/src/midi_map.rs` (mappings and feedback), `Engine::apply_midi_maps`, the `Controller` MIDI methods, the `midi` list in `loom-patch`, `crates/loom-app/src/learn.rs` (learn mode), and `LearnView` in `loom-canvas`. Tests: `crates/loom-modules/tests/midi_learn.rs`, and the learn mode tests in `loom-canvas`'s `widget.rs`.
 
 <!-- Spec first: agree on this before building. Keep it true as the code is
