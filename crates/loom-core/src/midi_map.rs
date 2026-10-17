@@ -10,6 +10,13 @@
 //! applies an entry only when the id matches and the sequence number moved,
 //! so a write from a mapping that no longer exists is never applied, and the
 //! same value sent twice is still seen twice.
+//!
+//! Screen edits and control changes can race: the controller changes the
+//! graph at once, but the engine applies the edit at its next buffer. So a
+//! screen edit on a mapped parameter carries an edit token, and the engine
+//! stores that token with its own sequence number in a second table when it
+//! applies the edit. Control changes and edits share one sequence, so the
+//! controller can tell which came last in the engine (MIDI learn, rule 2).
 
 use crate::descriptor::ParamSpec;
 use crate::graph::ModuleId;
@@ -100,6 +107,9 @@ pub(crate) struct MidiMapOp {
 /// What the engine reports to the controller. See the module docs.
 pub(crate) struct MidiFeedback {
     entries: Box<[AtomicU64]>,
+    /// The last screen edit the engine applied, per control:
+    /// `token << 32 | sequence`.
+    edits: Box<[AtomicU64]>,
     /// `serial << 32 | channel << 16 | controller << 8 | value`. 0 is none.
     last: AtomicU64,
 }
@@ -116,6 +126,7 @@ impl MidiFeedback {
     pub fn new() -> Self {
         Self {
             entries: (0..CHANNELS * CONTROLLERS).map(|_| AtomicU64::new(0)).collect(),
+            edits: (0..CHANNELS * CONTROLLERS).map(|_| AtomicU64::new(0)).collect(),
             last: AtomicU64::new(0),
         }
     }
@@ -136,6 +147,20 @@ impl MidiFeedback {
             sequence: ((packed >> 8) & 0x00FF_FFFF) as u32,
             value: (packed & 0x7F) as u8,
         }
+    }
+
+    /// Engine: the screen edit with `token` reached the mapped parameter of
+    /// `control` at `sequence`.
+    pub fn write_edit(&self, control: MidiControl, token: u32, sequence: u32) {
+        let packed = (u64::from(token) << 32) | u64::from(sequence & 0x00FF_FFFF);
+        self.edits[control.index()].store(packed, Ordering::Release);
+    }
+
+    /// Controller: the last screen edit applied for `control`, as
+    /// `(token, sequence)`. Tokens start at 1, so none reads as token 0.
+    pub fn read_edit(&self, control: MidiControl) -> (u32, u32) {
+        let packed = self.edits[control.index()].load(Ordering::Acquire);
+        ((packed >> 32) as u32, (packed & 0x00FF_FFFF) as u32)
     }
 
     /// Engine: a control change arrived. `serial` is never 0.
@@ -160,6 +185,13 @@ impl MidiFeedback {
             serial,
         })
     }
+}
+
+/// True when 24-bit sequence number `a` came after `b`. Sequences wrap, so
+/// "after" means less than half the range ahead.
+pub(crate) fn later(a: u32, b: u32) -> bool {
+    let ahead = a.wrapping_sub(b) & 0x00FF_FFFF;
+    ahead != 0 && ahead < 0x0080_0000
 }
 
 /// Reads the last control change from any thread, for example a UI watcher
@@ -209,6 +241,15 @@ mod tests {
                 value: 100
             }
         );
+    }
+
+    #[test]
+    fn sequences_compare_across_the_wrap() {
+        assert!(later(5, 4));
+        assert!(!later(4, 5));
+        assert!(!later(4, 4));
+        assert!(later(1, 0x00FF_FFFF));
+        assert!(!later(0x00FF_FFFF, 1));
     }
 
     #[test]

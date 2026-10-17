@@ -803,6 +803,9 @@ impl<Message> PatchCanvas<'_, Message> {
         match hit {
             Hit::Widget { module, widget } if self.learn.is_some() && self.is_control(module, widget) => {
                 self.select_for_edit(module, shell);
+                // The clicked control takes the keyboard focus, so Space or
+                // Enter acts on it next, not on a control focused earlier.
+                state.focus = Some((module, widget));
                 self.emit(shell, CanvasEvent::Learn { module, widget });
             }
             Hit::Widget { module, widget } => {

@@ -8,7 +8,7 @@ use crate::error::LoomError;
 use crate::graph::{Assignment, AssignmentId, Graph, InputRef, ModuleId, Node, OutputRef};
 use crate::midi::MidiEvent;
 use crate::midi_map::{
-    ControlChangeSeen, MidiControl, MidiFeedback, MidiMapping, MidiMappingId, MidiReader, control_value,
+    ControlChangeSeen, MidiControl, MidiFeedback, MidiMapping, MidiMappingId, MidiReader, control_value, later,
 };
 use crate::registry::Registry;
 use crate::telemetry::{ProbeId, ProbeKind, Telemetry, TelemetrySender};
@@ -67,6 +67,8 @@ pub fn create_engine(registry: Arc<Registry>, config: EngineConfig) -> EnginePar
         next_assignment: 1,
         next_midi_mapping: 1,
         midi_seen: BTreeMap::new(),
+        midi_edits: BTreeMap::new(),
+        next_edit: 1,
         midi_feedback,
         dirty: false,
         last_report: CompileReport::default(),
@@ -116,6 +118,10 @@ pub struct Controller {
     next_midi_mapping: u32,
     /// The last feedback sequence number applied, per MIDI mapping.
     midi_seen: BTreeMap<MidiMappingId, u32>,
+    /// Screen edits on mapped parameters that the engine has not confirmed
+    /// yet: the token of the latest one, per mapping.
+    midi_edits: BTreeMap<MidiMappingId, u32>,
+    next_edit: u32,
     /// What the engine's MIDI mappings did (MIDI learn, rules 2 and 3).
     midi_feedback: Arc<MidiFeedback>,
     dirty: bool,
@@ -386,6 +392,7 @@ impl Controller {
             .into_iter()
             .filter_map(|id| {
                 self.midi_seen.remove(&id);
+                self.midi_edits.remove(&id);
                 self.graph.midi_mappings.remove(&id)
             })
             .collect();
@@ -432,6 +439,7 @@ impl Controller {
             return Ok(None);
         };
         self.midi_seen.remove(&id);
+        self.midi_edits.remove(&id);
         self.dirty = true;
         Ok(self.graph.midi_mappings.remove(&id))
     }
@@ -454,11 +462,28 @@ impl Controller {
         let mut changed = Vec::new();
         for (&id, mapping) in &self.graph.midi_mappings {
             let entry = self.midi_feedback.read(mapping.control);
-            if entry.id != id || self.midi_seen.get(&id) == Some(&entry.sequence) {
-                continue;
+            let unseen = entry.id == id && self.midi_seen.get(&id) != Some(&entry.sequence);
+            let apply = match self.midi_edits.get(&id) {
+                // A screen edit is on its way to the engine. The graph has
+                // its value already, and any control change read now came
+                // before it, so wait.
+                Some(&token) => {
+                    let (applied, at) = self.midi_feedback.read_edit(mapping.control);
+                    if applied != token {
+                        continue;
+                    }
+                    // The engine applied the edit. Only a control change it
+                    // applied after the edit is new.
+                    self.midi_edits.remove(&id);
+                    unseen && later(entry.sequence, at)
+                }
+                None => unseen,
+            };
+            if entry.id == id {
+                self.midi_seen.insert(id, entry.sequence);
             }
-            self.midi_seen.insert(id, entry.sequence);
-            if let Some(node) = self.graph.nodes.get_mut(&mapping.target)
+            if apply
+                && let Some(node) = self.graph.nodes.get_mut(&mapping.target)
                 && let Some(spec) = node.descriptor.params.get(mapping.param)
             {
                 node.params[mapping.param] = control_value(spec, entry.value);
@@ -506,6 +531,13 @@ impl Controller {
     /// Sets a parameter by index. Takes effect at the next buffer.
     /// The value is clamped to the parameter's range.
     pub fn set_param(&mut self, module: ModuleId, index: usize, value: f32) -> Result<f32, LoomError> {
+        // On a mapped parameter, the edit carries a token, so `sync_midi`
+        // can tell whether a control change came before or after it in the
+        // engine (MIDI learn, rule 2).
+        let mapping = self
+            .graph
+            .midi_mapping_of(module, index)
+            .map(|(id, mapping)| (id, mapping.control));
         let node = self
             .graph
             .nodes
@@ -521,20 +553,23 @@ impl Controller {
             })?;
         let value = spec.clamp(value);
         node.params[index] = value;
+        let edit = mapping.map(|(_, control)| (control, self.next_edit));
         if let Some(slot) = node.slot
-            && self.commands.push(Command::SetParam { slot, index, value }).is_err()
+            && self
+                .commands
+                .push(Command::SetParam {
+                    slot,
+                    index,
+                    value,
+                    edit,
+                })
+                .is_err()
         {
             return Err(LoomError::QueueFull);
         }
-        // This edit is newer than any control change the graph has not read
-        // yet, so a later `sync_midi` must not bring that older value back.
-        // Control changes that reach the engine after this command still win
-        // there, and are read as new.
-        if let Some((id, mapping)) = self.graph.midi_mapping_of(module, index) {
-            let entry = self.midi_feedback.read(mapping.control);
-            if entry.id == id {
-                self.midi_seen.insert(id, entry.sequence);
-            }
+        if let Some((id, _)) = mapping {
+            self.midi_edits.insert(id, self.next_edit);
+            self.next_edit = self.next_edit.wrapping_add(1).max(1);
         }
         Ok(value)
     }
@@ -677,10 +712,24 @@ impl Controller {
         if self.commands.slots() < 1 + self.pending_removals.len() {
             return Err(LoomError::QueueFull);
         }
+        // What the graph holds per mapping. With a screen edit on its way,
+        // every control change so far is older than the graph's value.
+        let synced: BTreeMap<MidiMappingId, u32> = self
+            .graph
+            .midi_mappings()
+            .filter_map(|(id, mapping)| {
+                let entry = self.midi_feedback.read(mapping.control);
+                if self.midi_edits.contains_key(&id) && entry.id == id {
+                    Some((id, entry.sequence))
+                } else {
+                    self.midi_seen.get(&id).map(|&sequence| (id, sequence))
+                }
+            })
+            .collect();
         let (schedule, report) = compile(
             &self.graph,
             &self.probes,
-            &self.midi_seen,
+            &synced,
             self.config.sample_rate,
             self.config.max_block,
         );

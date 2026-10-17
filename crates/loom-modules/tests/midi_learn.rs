@@ -378,3 +378,19 @@ fn mappings_work_after_save_and_reopen() {
     send_cc(&mut reopened, CC74, 127);
     assert_eq!(step(&mut reopened).0, 1.0);
 }
+
+#[test]
+fn a_control_change_after_a_screen_edit_wins() {
+    let mut parts = engine();
+    let id = add_probe(&mut parts);
+    parts.controller.map_midi(CC74, id, 0).unwrap();
+    parts.controller.commit().unwrap();
+
+    // The screen edit and then a control change reach the engine in the
+    // same buffer: the edit first, as commands run before MIDI.
+    parts.controller.set_param(id, 0, 0.25).unwrap();
+    send_cc(&mut parts, CC74, 127);
+    assert_eq!(step(&mut parts).0, 1.0);
+    assert_eq!(parts.controller.sync_midi(), vec![(id, 0)]);
+    assert_eq!(parts.controller.graph().node(id).unwrap().params[0], 1.0);
+}
