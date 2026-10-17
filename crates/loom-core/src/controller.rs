@@ -526,6 +526,16 @@ impl Controller {
         {
             return Err(LoomError::QueueFull);
         }
+        // This edit is newer than any control change the graph has not read
+        // yet, so a later `sync_midi` must not bring that older value back.
+        // Control changes that reach the engine after this command still win
+        // there, and are read as new.
+        if let Some((id, mapping)) = self.graph.midi_mapping_of(module, index) {
+            let entry = self.midi_feedback.read(mapping.control);
+            if entry.id == id {
+                self.midi_seen.insert(id, entry.sequence);
+            }
+        }
         Ok(value)
     }
 
@@ -656,6 +666,9 @@ impl Controller {
     /// it at the start of its next buffer, with no dropout (FR-GRAPH-02).
     pub fn commit(&mut self) -> Result<&CompileReport, LoomError> {
         self.collect_garbage();
+        // The compiled base values come from the graph, so it must hold what
+        // MIDI mappings set in the engine first.
+        self.sync_midi();
         if !self.dirty {
             return Ok(&self.last_report);
         }
@@ -667,6 +680,7 @@ impl Controller {
         let (schedule, report) = compile(
             &self.graph,
             &self.probes,
+            &self.midi_seen,
             self.config.sample_rate,
             self.config.max_block,
         );

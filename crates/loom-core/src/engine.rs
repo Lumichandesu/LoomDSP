@@ -261,6 +261,7 @@ impl Engine {
                     });
                     let old = std::mem::replace(&mut self.schedule, schedule);
                     self.discard(Garbage::Schedule(old));
+                    self.reapply_midi_maps();
                     self.stats.schedule_swaps.fetch_add(1, Ordering::Relaxed);
                 }
                 Command::SetParam { slot, index, value } => {
@@ -398,6 +399,26 @@ impl Engine {
                     base,
                 );
                 self.midi_feedback.write(control, map.id, self.cc_serial, value);
+            }
+        }
+    }
+
+    /// After a swap: a control change applied to the old schedule after the
+    /// new one was compiled is missing from the new one's base values.
+    /// Applies it again (MIDI learn, rule 2). Screen edits made after the
+    /// compile are queued behind the swap, so they still win.
+    fn reapply_midi_maps(&mut self) {
+        for map in &self.schedule.midi_maps {
+            let entry = self.midi_feedback.read(map.control);
+            if entry.id == map.id && Some(entry.sequence) != map.synced {
+                let base = crate::midi_map::control_value(map.spec, entry.value);
+                set_base(
+                    &mut self.slots,
+                    &mut self.schedule.fills,
+                    map.slot as usize,
+                    usize::from(map.param),
+                    base,
+                );
             }
         }
     }

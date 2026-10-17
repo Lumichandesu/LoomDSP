@@ -8,8 +8,8 @@ use loom_core::{
 use loom_modules::register_all;
 use std::sync::Arc;
 
-/// Writes its first parameter on `out`, and the number of control changes it
-/// has seen on `ccs`.
+/// Writes its first parameter on `out` (the modulated value when it has an
+/// assignment), and the number of control changes it has seen on `ccs`.
 struct Probe {
     values: [f32; 2],
     ccs: f32,
@@ -22,8 +22,11 @@ impl Module for Probe {
                 self.ccs += 1.0;
             }
         }
+        let modulated = io.modulated(0);
         let ([], [out, ccs]) = io.split::<0, 2>();
-        out.fill(self.values[0]);
+        for (i, sample) in out.iter_mut().enumerate() {
+            *sample = modulated.map_or(self.values[0], |values| values[i]);
+        }
         ccs.fill(self.ccs);
     }
 
@@ -311,4 +314,67 @@ fn invalid_controls_are_refused() {
     };
     assert!(parts.controller.map_midi(bad, id, 0).is_err());
     assert!(parts.controller.map_midi(CC74, id, 9).is_err());
+}
+
+#[test]
+fn a_screen_edit_is_not_undone_by_an_older_control_change() {
+    let mut parts = engine();
+    let id = add_probe(&mut parts);
+    parts.controller.map_midi(CC74, id, 0).unwrap();
+    parts.controller.commit().unwrap();
+    send_cc(&mut parts, CC74, 127);
+    step(&mut parts);
+
+    // The knob on screen moves before the UI reads the control change.
+    parts.controller.set_param(id, 0, 0.25).unwrap();
+    assert!(parts.controller.sync_midi().is_empty());
+    assert_eq!(parts.controller.graph().node(id).unwrap().params[0], 0.25);
+    assert_eq!(step(&mut parts).0, 0.25);
+}
+
+#[test]
+fn a_commit_keeps_the_value_a_control_change_set() {
+    let mut parts = engine();
+    let id = add_probe(&mut parts);
+    // A zero-depth assignment makes the engine fill the parameter from the
+    // compiled base value.
+    parts
+        .controller
+        .add_assignment_named(id, "ccs", id, "level", 0.0)
+        .unwrap();
+    parts.controller.map_midi(CC74, id, 0).unwrap();
+    parts.controller.commit().unwrap();
+    send_cc(&mut parts, CC74, 127);
+    assert_eq!(step(&mut parts).0, 1.0);
+
+    // An edit elsewhere recompiles before the UI has read the change.
+    parts.controller.add_module("test.probe").unwrap();
+    parts.controller.commit().unwrap();
+    assert_eq!(step(&mut parts).0, 1.0);
+    assert_eq!(parts.controller.graph().node(id).unwrap().params[0], 1.0);
+}
+
+#[test]
+fn mappings_work_after_save_and_reopen() {
+    let mut parts = engine();
+    let id = add_probe(&mut parts);
+    parts.controller.map_midi(CC74, id, 0).unwrap();
+    parts.controller.commit().unwrap();
+    let text = loom_patch::Patch::from_graph("Saved", parts.controller.graph())
+        .to_ron()
+        .unwrap();
+    assert!(text.contains("midi:"), "{text}");
+
+    let mut reopened = engine();
+    loom_patch::Patch::from_ron(&text)
+        .unwrap()
+        .load_into(&mut reopened.controller)
+        .unwrap();
+    for port in ["out", "ccs"] {
+        let output = reopened.controller.output_ref(id, port).unwrap();
+        reopened.controller.add_probe(output, ProbeKind::Scope).unwrap();
+    }
+    reopened.controller.commit().unwrap();
+    send_cc(&mut reopened, CC74, 127);
+    assert_eq!(step(&mut reopened).0, 1.0);
 }

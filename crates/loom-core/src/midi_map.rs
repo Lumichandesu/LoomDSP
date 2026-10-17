@@ -88,6 +88,10 @@ pub fn control_value(spec: &ParamSpec, value: u8) -> f32 {
 pub(crate) struct MidiMapOp {
     pub control: MidiControl,
     pub id: MidiMappingId,
+    /// The feedback sequence number the graph held when this schedule was
+    /// compiled. A newer one at the swap means a control change arrived in
+    /// between, and the engine applies it again on the new schedule.
+    pub synced: Option<u32>,
     pub slot: u32,
     pub param: u16,
     pub spec: &'static ParamSpec,

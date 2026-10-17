@@ -720,7 +720,23 @@ impl<Message> PatchCanvas<'_, Message> {
             }
             keyboard::Key::Named(Named::Escape) if state.focus.is_some() => {
                 state.focus = None;
+                // In MIDI learn mode, Escape also ends the mode, so the app
+                // must see it too.
+                self.learn.is_none()
+            }
+            // In MIDI learn mode the keyboard arms the focused control, like
+            // a click, and never changes a value (midi-learn.md).
+            keyboard::Key::Named(Named::Space | Named::Enter) if self.learn.is_some() => {
+                let Some((module, widget)) = state.focus else {
+                    return false;
+                };
+                self.emit(shell, CanvasEvent::Learn { module, widget });
                 true
+            }
+            keyboard::Key::Named(Named::ArrowUp | Named::ArrowRight | Named::ArrowDown | Named::ArrowLeft)
+                if self.learn.is_some() =>
+            {
+                false
             }
             keyboard::Key::Named(
                 named @ (Named::ArrowUp | Named::ArrowRight | Named::ArrowDown | Named::ArrowLeft),

@@ -38,9 +38,11 @@ The user touches the control on screen, then moves the hardware control. Learn m
 | In learn mode, click a knob, toggle, or radio button on a tile, or a parameter row in the inspector | That parameter is armed. The control is highlighted and the status bar says **Move a MIDI control to map it to <module> <parameter>**. The value does not change. Any parameter armed before is disarmed. |
 | Move a hardware knob or fader while a parameter is armed | A mapping is made from that control change (channel and controller number) to the armed parameter. The status bar says which control was mapped. Nothing is armed now, and learn mode stays on, so the next control can be mapped at once. |
 | In learn mode, click an armed control again | It is disarmed. |
+| In learn mode, press Space or Enter on a control focused with Tab | The same as a click: it arms or disarms the control. The arrow keys do nothing. |
 | Press **MIDI learn** again, or press Escape | Learn mode ends. An armed parameter is disarmed with no change. |
 
 - **Touch first, then the hardware.** *Why:* the user points at what they want to control and then shows which hardware control does it. This is direct manipulation, and it is the order the user thinks in. Learning from a list in the inspector alone is harder to follow.
+- **In learn mode, nothing changes a value.** Not a click, a drag, or a key. *Why:* the mode exists so that touching a control is safe.
 - **Learn mode stays on after a mapping.** *Why:* the common task is to map several knobs in a row (the P1 goal maps four). Leaving the mode after each one would add a click per knob.
 - **Outside learn mode, touching a control only changes its value,** as today. *Why:* moving a hardware control after touching a screen knob is normal in play. It must never remap anything by accident.
 - **Only one parameter is armed at a time.** *Why:* the next control change must have exactly one target, so the result is never a surprise.
@@ -64,13 +66,18 @@ The user touches the control on screen, then moves the hardware control. Learn m
 ## Rules
 
 1. **Mappings run in the engine.** The controller compiles the patch's mappings into a table and sends it to the audio thread with the schedule. The engine reads each incoming control change, looks it up, and sets the base value. *Why:* the same patch must respond to the same controller in the desktop app, in `loom play`, and in an exported plugin (ADR-0004), none of which can rely on the app's UI thread. It also adds no latency beyond the audio buffer.
-2. **The engine reports values back to the controller.** After each block, the engine writes the latest value of each mapped parameter that changed into a latest-value table, like display values ([panels](panels.md)). The controller reads it and updates its graph. *Why:* the graph is what the UI draws and what is saved. A latest-value table loses nothing that matters if the UI is slow, and never makes the audio thread wait.
+2. **The engine reports values back to the controller.** When a mapped control change arrives, the engine writes it into a latest-value table: one entry per control (16 channels × 128 controller numbers), holding the mapping's id, a sequence number, and the 7-bit value. The controller reads the table, turns the value into a parameter value with the same mapping, and updates its graph. Three ordering rules keep the graph and the engine in step:
+   - The controller reads the table before it compiles, because compiled base values come from the graph.
+   - A screen edit marks the entry it replaces as read, so an older control change never overwrites a newer edit.
+   - A control change that reaches the engine between a compile and the schedule swap is applied again to the new schedule. Screen edits made in that time are queued after the swap, so they still win.
+
+   *Why:* the graph is what the UI draws and what is saved. A latest-value table loses nothing that matters if the UI is slow, and never makes the audio thread wait. The id says which mapping wrote an entry, so a write from a mapping that no longer exists is ignored. The sequence number shows the same value sent twice.
 3. **Learn reads control changes from the engine, too.** The engine records the last control change it received (channel, controller number, and a counter that goes up with each one). The controller reads it while a parameter is armed. *Why:* every host sends MIDI to the engine already. Learn then works the same way in every host, with no second MIDI path.
 4. **A mapped control change applies at the start of the buffer it arrives in**, like a screen knob change. *Why:* an unmodulated parameter is constant for a block, and one block is a few milliseconds, too short to hear on a knob move. The desktop host stamps live MIDI at frame 0 today anyway. Output stays deterministic for the same input and block size. An offline render that feeds control changes at frame offsets would depend on the block size. No render path feeds control changes yet; revisit this rule when one does.
 5. **A mapping matches one channel and one controller number,** the ones the user moved while learning. *Why:* what the user moved is what works. Most controllers send each knob on one channel, so this needs no setting. Two controllers that send the same controller number on different channels stay apart.
 6. **Mapped control changes still reach modules.** A MIDI input module (#30) still sees every control change. *Why:* hiding messages that a mapping uses is a surprise that is hard to debug. If this causes trouble in use, a later change can add a "consume" option.
 7. **Mappings are saved with the patch.** A new list in the patch file, empty when missing. The patch format stays at version 1. *Why:* the issue asks for it, and a patch should play the same way when opened again. Per-device mappings that live outside patches are FR-MIDI-06, P2.
-8. **Real-time rules hold.** The mapping table and the latest-value table are built on the control thread, with one entry per mapping. The engine only reads the mapping table and writes its own entries, with no allocation, lock, or wait (hard rule 1).
+8. **Real-time rules hold.** The mapping table is built on the control thread and sent with the schedule. The latest-value table is a fixed table of atomics, allocated once when the engine is created. The engine reads the mapping table and stores into the latest-value table with no allocation, lock, or wait (hard rule 1).
 
 ### Patch format
 
