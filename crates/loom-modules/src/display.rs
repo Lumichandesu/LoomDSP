@@ -21,7 +21,6 @@ pub static METER: ModuleDescriptor = ModuleDescriptor {
         signal: SignalType::Audio,
         description: "The signal to measure.",
         default: PortDefault::Value(0.0),
-
         polarity: Polarity::Bipolar,
     }],
     outputs: &[PortSpec {
@@ -30,7 +29,6 @@ pub static METER: ModuleDescriptor = ModuleDescriptor {
         signal: SignalType::Audio,
         description: "The input, unchanged.",
         default: PortDefault::Value(0.0),
-
         polarity: Polarity::Bipolar,
     }],
     params: &[],

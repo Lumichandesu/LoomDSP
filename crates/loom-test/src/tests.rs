@@ -389,7 +389,6 @@ static UNDOCUMENTED: ModuleDescriptor = ModuleDescriptor {
         signal: SignalType::Audio,
         description: "",
         default: PortDefault::Value(0.0),
-
         polarity: Polarity::Bipolar,
     }],
     outputs: &[port("out", SignalType::Audio)],

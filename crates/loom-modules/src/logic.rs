@@ -29,7 +29,6 @@ pub static DIVIDE: ModuleDescriptor = ModuleDescriptor {
             signal: SignalType::Gate,
             description: "The triggers to count.",
             default: PortDefault::Value(0.0),
-
             polarity: Polarity::Unipolar,
         },
         PortSpec {
@@ -38,7 +37,6 @@ pub static DIVIDE: ModuleDescriptor = ModuleDescriptor {
             signal: SignalType::Gate,
             description: "Starts the count again.",
             default: PortDefault::Value(0.0),
-
             polarity: Polarity::Unipolar,
         },
     ],
@@ -48,7 +46,6 @@ pub static DIVIDE: ModuleDescriptor = ModuleDescriptor {
         signal: SignalType::Gate,
         description: "Fires on every Nth trigger.",
         default: PortDefault::Value(0.0),
-
         polarity: Polarity::Unipolar,
     }],
     params: &[

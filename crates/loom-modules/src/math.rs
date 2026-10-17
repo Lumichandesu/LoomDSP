@@ -23,7 +23,6 @@ pub static ADD: ModuleDescriptor = ModuleDescriptor {
             signal: SignalType::Modulation,
             description: "The first signal to add.",
             default: PortDefault::Value(0.0),
-
             polarity: Polarity::Bipolar,
         },
         PortSpec {
@@ -32,7 +31,6 @@ pub static ADD: ModuleDescriptor = ModuleDescriptor {
             signal: SignalType::Modulation,
             description: "The second signal to add.",
             default: PortDefault::Value(0.0),
-
             polarity: Polarity::Bipolar,
         },
     ],
@@ -104,7 +102,6 @@ pub static MUL: ModuleDescriptor = ModuleDescriptor {
             signal: SignalType::Audio,
             description: "The signal to scale.",
             default: PortDefault::Value(0.0),
-
             polarity: Polarity::Bipolar,
         },
         PortSpec {
@@ -113,7 +110,6 @@ pub static MUL: ModuleDescriptor = ModuleDescriptor {
             signal: SignalType::Modulation,
             description: "Scales A. Reads 1 while no cable is connected.",
             default: PortDefault::Value(0.0),
-
             polarity: Polarity::Bipolar,
         },
     ],

@@ -24,7 +24,6 @@ pub static PHASE: ModuleDescriptor = ModuleDescriptor {
             signal: SignalType::Pitch,
             description: "Sets the frequency. 0 is middle C, and +0.1 is one octave up.",
             default: PortDefault::Value(0.0),
-
             polarity: Polarity::Bipolar,
         },
         PortSpec {
@@ -33,7 +32,6 @@ pub static PHASE: ModuleDescriptor = ModuleDescriptor {
             signal: SignalType::Gate,
             description: "A rising edge sets the phase back to 0.",
             default: PortDefault::Value(0.0),
-
             polarity: Polarity::Unipolar,
         },
     ],
@@ -43,7 +41,6 @@ pub static PHASE: ModuleDescriptor = ModuleDescriptor {
         signal: SignalType::Phase,
         description: "A ramp from 0 up to 1, once per cycle.",
         default: PortDefault::Value(0.0),
-
         polarity: Polarity::Unipolar,
     }],
     params: &[
@@ -168,7 +165,6 @@ pub static PHASE_TRIGGER: ModuleDescriptor = ModuleDescriptor {
         signal: SignalType::Phase,
         description: "The phase to watch. Each wrap fires a trigger.",
         default: PortDefault::Value(0.0),
-
         polarity: Polarity::Unipolar,
     }],
     outputs: &[PortSpec {
@@ -177,7 +173,6 @@ pub static PHASE_TRIGGER: ModuleDescriptor = ModuleDescriptor {
         signal: SignalType::Gate,
         description: "Fires once each time the phase wraps.",
         default: PortDefault::Value(0.0),
-
         polarity: Polarity::Unipolar,
     }],
     params: &[],

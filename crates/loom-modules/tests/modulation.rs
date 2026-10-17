@@ -549,3 +549,25 @@ fn noise_returns_to_base_seed() {
         assert_eq!(after, reference, "{how:?}");
     }
 }
+
+/// A cycle of cables needs a cable delay whatever the compiler does. Once
+/// that delay is in, the assignment below is no longer in a loop, so it must
+/// not be delayed too (review on #133).
+#[test]
+fn cable_cycle_is_broken_before_an_assignment_that_needs_no_delay() {
+    let mut parts = engine();
+    let controller = &mut parts.controller;
+    let first = controller.add_module("loom.math.add").unwrap();
+    let second = controller.add_module("loom.math.add").unwrap();
+    controller.connect_named(first, "out", second, "a").unwrap();
+    controller.connect_named(second, "out", first, "a").unwrap();
+    controller
+        .add_assignment_named(first, "out", second, "offset", 0.5)
+        .unwrap();
+    listen(controller, second, "out");
+    let report = controller.commit().unwrap();
+    let delays: Vec<_> = report.inserted_delays().collect();
+    assert_eq!(delays.len(), 1, "{delays:?}");
+    assert_eq!(delays[0].1.module, first, "the cable into the first add is delayed");
+    assert_eq!(report.inserted_assignment_delays().count(), 0);
+}

@@ -23,7 +23,6 @@ pub static SVF: ModuleDescriptor = ModuleDescriptor {
             signal: SignalType::Audio,
             description: "The audio to filter.",
             default: PortDefault::Value(0.0),
-
             polarity: Polarity::Bipolar,
         },
         PortSpec {
@@ -32,7 +31,6 @@ pub static SVF: ModuleDescriptor = ModuleDescriptor {
             signal: SignalType::Pitch,
             description: "Moves the cutoff as pitch: +0.1 doubles it.",
             default: PortDefault::Value(0.0),
-
             polarity: Polarity::Bipolar,
         },
     ],
@@ -43,7 +41,6 @@ pub static SVF: ModuleDescriptor = ModuleDescriptor {
             signal: SignalType::Audio,
             description: "Keeps the frequencies below the cutoff.",
             default: PortDefault::Value(0.0),
-
             polarity: Polarity::Bipolar,
         },
         PortSpec {
@@ -52,7 +49,6 @@ pub static SVF: ModuleDescriptor = ModuleDescriptor {
             signal: SignalType::Audio,
             description: "Keeps the frequencies near the cutoff.",
             default: PortDefault::Value(0.0),
-
             polarity: Polarity::Bipolar,
         },
         PortSpec {
@@ -61,7 +57,6 @@ pub static SVF: ModuleDescriptor = ModuleDescriptor {
             signal: SignalType::Audio,
             description: "Keeps the frequencies above the cutoff.",
             default: PortDefault::Value(0.0),
-
             polarity: Polarity::Bipolar,
         },
     ],

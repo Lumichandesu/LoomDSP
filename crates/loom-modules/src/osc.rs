@@ -22,7 +22,6 @@ pub static SINE: ModuleDescriptor = ModuleDescriptor {
         signal: SignalType::Phase,
         description: "Position in the wave, from 0 to 1. One ramp is one cycle.",
         default: PortDefault::Value(0.0),
-
         polarity: Polarity::Unipolar,
     }],
     outputs: &[PortSpec {
@@ -31,7 +30,6 @@ pub static SINE: ModuleDescriptor = ModuleDescriptor {
         signal: SignalType::Audio,
         description: "Sine wave from -1 to 1.",
         default: PortDefault::Value(0.0),
-
         polarity: Polarity::Bipolar,
     }],
     params: &[],
@@ -64,7 +62,6 @@ pub static SAW: ModuleDescriptor = ModuleDescriptor {
         signal: SignalType::Phase,
         description: "Position in the wave, from 0 to 1. One ramp is one cycle.",
         default: PortDefault::Value(0.0),
-
         polarity: Polarity::Unipolar,
     }],
     outputs: &[PortSpec {
@@ -73,7 +70,6 @@ pub static SAW: ModuleDescriptor = ModuleDescriptor {
         signal: SignalType::Audio,
         description: "Saw wave from -1 to 1.",
         default: PortDefault::Value(0.0),
-
         polarity: Polarity::Bipolar,
     }],
     params: &[],
@@ -138,7 +134,6 @@ pub static NOISE: ModuleDescriptor = ModuleDescriptor {
         signal: SignalType::Audio,
         description: "White noise from -1 to 1.",
         default: PortDefault::Value(0.0),
-
         polarity: Polarity::Bipolar,
     }],
     params: &[ParamSpec {

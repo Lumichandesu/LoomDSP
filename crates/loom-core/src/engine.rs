@@ -521,6 +521,8 @@ impl Engine {
 fn fill_param(fill: &mut ParamFill, assignments: &[AssignmentRuntime], offset: usize, len: usize) {
     let spec = fill.spec;
     let base = fill.base;
+    // Constant for the call. Used when the base has no smoother.
+    let base_position = spec.normalize(base);
     // SAFETY: the compiler allocated `buffer` for `max_block` floats, and
     // `offset + len` stays inside that. The audio thread does not alias it
     // with a source buffer: sources are output buffers or delay taps.
@@ -546,7 +548,7 @@ fn fill_param(fill: &mut ParamFill, assignments: &[AssignmentRuntime], offset: u
         let position = if let Some(smooth) = fill.smooth.as_mut() {
             smooth.tick()
         } else {
-            spec.normalize(base)
+            base_position
         };
         let settled = fill
             .smooth

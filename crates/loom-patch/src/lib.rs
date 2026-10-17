@@ -23,8 +23,9 @@
 //! ```
 //!
 //! Saved files are canonical: modules sorted by ID, cables sorted by input,
-//! modulation sorted by target then source, parameters sorted by name.
-//! This keeps git diffs small.
+//! parameters sorted by name. This keeps git diffs small. Modulation keeps
+//! the order the assignments were made in, because the engine adds several
+//! assignments on one parameter in that order, and float sums depend on it.
 
 #![warn(missing_docs)]
 
@@ -256,17 +257,13 @@ impl Patch {
     }
 
     /// Sorts modules, cables, and parameters into canonical order.
+    ///
+    /// Modulation is not sorted. Loading gives assignments ids in file order,
+    /// and the engine adds them in id order, so a reloaded patch sums its
+    /// assignments the same way as the patch that was saved.
     pub fn canonicalise(&mut self) {
         self.modules.sort_by_key(|m| m.id);
         self.cables.sort_by(|a, b| (a.to.0, &a.to.1).cmp(&(b.to.0, &b.to.1)));
-        self.modulation.sort_by(|a, b| {
-            (&a.target.0, &a.target.1, &a.source.0, &a.source.1).cmp(&(
-                &b.target.0,
-                &b.target.1,
-                &b.source.0,
-                &b.source.1,
-            ))
-        });
     }
 
     /// Upgrades an older patch to [`CURRENT_VERSION`].
@@ -475,17 +472,50 @@ Patch(
         let mut expected = patch.clone();
         expected.canonicalise();
         assert_eq!(saved, expected);
-        assert_eq!(saved.modulation[0].target.1, "cutoff");
-        assert!(saved.modulation[0].polarity.is_none());
-        assert!(saved.modulation[0].enabled);
-        assert_eq!(saved.modulation[1].polarity, Some(PatchPolarity::Unipolar));
-        assert!(!saved.modulation[1].enabled);
+        // File order is kept, not sorted by target.
+        assert_eq!(saved.modulation[0].target.1, "resonance");
+        assert_eq!(saved.modulation[0].polarity, Some(PatchPolarity::Unipolar));
+        assert!(!saved.modulation[0].enabled);
+        assert_eq!(saved.modulation[1].target.1, "cutoff");
+        assert!(saved.modulation[1].polarity.is_none());
+        assert!(saved.modulation[1].enabled);
 
         let text = saved.to_ron().unwrap();
         assert!(text.contains("modulation:"));
         assert!(text.contains("enabled: false"));
         assert!(!text.contains("enabled: true"));
         assert_eq!(Patch::from_ron(&text).unwrap().to_ron().unwrap(), text);
+    }
+
+    /// The engine adds assignments on one parameter in id order. Float sums
+    /// depend on order, so a reloaded patch must keep it (review on #133).
+    #[test]
+    fn assignment_order_survives_save_and_load() {
+        let mut parts = create_engine(loom_modules::registry(), EngineConfig::default());
+        let controller = &mut parts.controller;
+        let low = controller.add_module("loom.math.constant").unwrap();
+        let high = controller.add_module("loom.math.constant").unwrap();
+        let filter = controller.add_module("loom.filter.svf").unwrap();
+        // Made from the higher module id first, so sorting by source would
+        // swap them.
+        controller
+            .add_assignment_named(high, "out", filter, "cutoff", 0.5)
+            .unwrap();
+        controller
+            .add_assignment_named(low, "out", filter, "cutoff", -0.25)
+            .unwrap();
+        let order = |graph: &Graph| -> Vec<(OutputRef, f32)> {
+            graph.assignments().map(|(_, a)| (a.source, a.depth)).collect()
+        };
+        let before = order(controller.graph());
+
+        let text = Patch::from_graph("Order", controller.graph()).to_ron().unwrap();
+        let mut reloaded = create_engine(loom_modules::registry(), EngineConfig::default());
+        Patch::from_ron(&text)
+            .unwrap()
+            .load_into(&mut reloaded.controller)
+            .unwrap();
+        assert_eq!(order(reloaded.controller.graph()), before);
     }
 
     #[test]

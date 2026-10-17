@@ -27,7 +27,6 @@ static LAMP: ModuleDescriptor = ModuleDescriptor {
         signal: SignalType::Modulation,
         description: "The level.",
         default: PortDefault::Value(0.0),
-
         polarity: Polarity::Bipolar,
     }],
     params: &[ParamSpec {

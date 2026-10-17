@@ -69,9 +69,10 @@ pub struct PortSpec {
     /// What an input reads while no cable is connected. Ignored on outputs;
     /// write `PortDefault::Value(0.0)` there.
     pub default: PortDefault,
-    /// How an output moves a modulated control. Ignored on inputs.
-    /// Gate and phase default to unipolar. Audio, pitch, and modulation
-    /// default to bipolar.
+    /// How an output moves a modulated control. Every port must name one.
+    /// The usual choice: gates, phases, and envelopes are unipolar; audio,
+    /// pitch, and LFOs are bipolar. Ignored on inputs; write the polarity of
+    /// the signal the input expects there.
     pub polarity: Polarity,
 }
 
@@ -855,7 +856,6 @@ mod tests {
             signal: SignalType::Audio,
             description: "",
             default: PortDefault::Value(0.0),
-
             polarity: Polarity::Bipolar,
         }],
         outputs: &[PortSpec {
@@ -864,7 +864,6 @@ mod tests {
             signal: SignalType::Audio,
             description: "The input.",
             default: PortDefault::Value(0.0),
-
             polarity: Polarity::Bipolar,
         }],
         params: &[ParamSpec {

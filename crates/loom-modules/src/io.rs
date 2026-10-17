@@ -18,7 +18,6 @@ pub static UNIT_DELAY: ModuleDescriptor = ModuleDescriptor {
         signal: SignalType::Audio,
         description: "The signal to delay.",
         default: PortDefault::Value(0.0),
-
         polarity: Polarity::Bipolar,
     }],
     outputs: &[PortSpec {
@@ -27,7 +26,6 @@ pub static UNIT_DELAY: ModuleDescriptor = ModuleDescriptor {
         signal: SignalType::Audio,
         description: "The input, one sample later.",
         default: PortDefault::Value(0.0),
-
         polarity: Polarity::Bipolar,
     }],
     params: &[],
@@ -50,7 +48,6 @@ pub static AUDIO_OUT: ModuleDescriptor = ModuleDescriptor {
             signal: SignalType::Audio,
             description: "The left channel. Plays on both sides if Right has no cable.",
             default: PortDefault::Value(0.0),
-
             polarity: Polarity::Bipolar,
         },
         PortSpec {
@@ -59,7 +56,6 @@ pub static AUDIO_OUT: ModuleDescriptor = ModuleDescriptor {
             signal: SignalType::Audio,
             description: "The right channel. Plays on both sides if Left has no cable.",
             default: PortDefault::Value(0.0),
-
             polarity: Polarity::Bipolar,
         },
     ],

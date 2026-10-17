@@ -499,22 +499,65 @@ pub(crate) fn compile(
             if ordered.len() == members.len() {
                 break;
             }
+            let remaining = || members.iter().copied().filter(|v| !done.contains(v));
+            let is_cable = |dep: &Dep| matches!(dep, Dep::Cable(_));
+            let is_assignment = |dep: &Dep| matches!(dep, Dep::Assignment(_));
+            // True when `from` reaches `to` over cables that are not yet
+            // broken, through modules that have not run yet.
+            let cable_reaches = |from: usize, to: usize, done: &BTreeSet<usize>, broken: &BTreeSet<Dep>| {
+                let mut seen = BTreeSet::from([from]);
+                let mut stack = vec![from];
+                while let Some(u) = stack.pop() {
+                    for (dep, w) in outgoing.get(&u).into_iter().flatten() {
+                        if !is_cable(dep) || broken.contains(dep) || done.contains(w) {
+                            continue;
+                        }
+                        if *w == to {
+                            return true;
+                        }
+                        if seen.insert(*w) {
+                            stack.push(*w);
+                        }
+                    }
+                }
+                false
+            };
+            // An unbroken cable into `v` that lies on a cycle of cables only.
+            // Only a cable delay can break such a cycle.
+            let on_cable_cycle =
+                |v: usize, dep: &Dep, from: &OutputRef, done: &BTreeSet<usize>, broken: &BTreeSet<Dep>| {
+                    let u = index_of[&from.module];
+                    is_cable(dep)
+                        && !broken.contains(dep)
+                        && !done.contains(&u)
+                        && (u == v || cable_reaches(v, u, done, broken))
+                };
+            let assignments_left = remaining().any(|v| unresolved(v, is_assignment, &done, &broken));
+            let cable_cycle_at = |v: usize| {
+                incoming
+                    .get(&v)
+                    .into_iter()
+                    .flatten()
+                    .any(|(dep, from)| on_cable_cycle(v, dep, from, &done, &broken))
+            };
             // Prefer to delay an assignment. A modulation loop then keeps the
-            // audio cables on their current sample.
-            let assignment_victim = members
-                .iter()
-                .filter(|v| !done.contains(v))
-                .filter(|v| unresolved(**v, |dep| matches!(dep, Dep::Assignment(_)), &done, &broken))
-                .min_by_key(|v| {
-                    let count = incoming
-                        .get(v)
-                        .into_iter()
-                        .flatten()
-                        .filter(|(dep, _)| matches!(dep, Dep::Assignment(_)))
-                        .count();
-                    (count, **v)
-                });
-            if let Some(&v) = assignment_victim {
+            // audio cables on their current sample. A cycle of cables only
+            // needs a cable delay anyway, so break those first: that cable
+            // may also resolve the modulation loop, and then no assignment
+            // is delayed for nothing.
+            if assignments_left && !remaining().any(cable_cycle_at) {
+                let v = remaining()
+                    .filter(|&v| unresolved(v, is_assignment, &done, &broken))
+                    .min_by_key(|v| {
+                        let count = incoming
+                            .get(v)
+                            .into_iter()
+                            .flatten()
+                            .filter(|(dep, _)| is_assignment(dep))
+                            .count();
+                        (count, *v)
+                    })
+                    .expect("an assignment is left");
                 for (dep, from) in incoming.get(&v).into_iter().flatten() {
                     let Dep::Assignment(id) = *dep else {
                         continue;
@@ -542,34 +585,46 @@ pub(crate) fn compile(
             }
             // Stuck on a cycle with no unit delay. Pick the remaining module
             // with the fewest unresolved inputs (lowest ID on ties) and put a
-            // one-sample delay on each of those inputs.
-            let v = *members
-                .iter()
-                .filter(|v| !done.contains(v))
-                .min_by_key(|v| (indegree[v], **v))
+            // one-sample delay on each of those inputs. With assignments
+            // left, only modules and cables on a cable-only cycle count, so
+            // no cable is delayed where an assignment delay would do.
+            let v = remaining()
+                .filter(|&v| !assignments_left || cable_cycle_at(v))
+                .min_by_key(|v| (indegree[v], *v))
                 .expect("remaining member");
-            for (dep, from) in incoming.get(&v).into_iter().flatten() {
-                let Dep::Cable(input) = *dep else {
+            let victims: Vec<(Dep, OutputRef)> = incoming
+                .get(&v)
+                .into_iter()
+                .flatten()
+                .filter(|(dep, from)| {
+                    if assignments_left {
+                        on_cable_cycle(v, dep, from, &done, &broken)
+                    } else {
+                        is_cable(dep) && !broken.contains(dep) && !done.contains(&index_of[&from.module])
+                    }
+                })
+                .copied()
+                .collect();
+            for (dep, from) in victims {
+                let Dep::Cable(input) = dep else {
                     continue;
                 };
-                if done.contains(&index_of[&from.module]) || broken.contains(dep) {
-                    continue;
-                }
                 buffer_count += 1;
                 let output = buffer_count - 1;
                 taps.push(TapSpec {
                     key: AUTO_TAP | (u64::from(input.module.0) << 16) | (input.port as u64 & 0xFFFF),
-                    input: Some(source_buffer(*from)),
+                    input: Some(source_buffer(from)),
                     output,
                 });
                 loop_taps.push(taps.len() - 1);
                 overrides.insert(input, output);
-                broken.insert(*dep);
-                inserted.push((*from, input));
+                broken.insert(dep);
+                inserted.push((from, input));
                 *indegree.get_mut(&v).expect("member") -= 1;
             }
-            debug_assert_eq!(indegree[&v], 0);
-            ready.insert(v);
+            if indegree[&v] == 0 {
+                ready.insert(v);
+            }
         }
 
         let mut loop_modules: Vec<ModuleId> = scc.iter().map(|&v| ids[v]).collect();
