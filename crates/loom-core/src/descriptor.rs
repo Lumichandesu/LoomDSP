@@ -426,12 +426,28 @@ impl Widget {
         }
     }
 
+    /// A large button for a whole-number parameter from 0 to 1.
+    ///
+    /// `mode` names the whole-number parameter that chooses the gesture:
+    /// 0 flips `param` on press, and 1 holds it high while the button is
+    /// held. The canvas reads that parameter. It does not have to be a
+    /// widget. Spec: `docs/design/clock.md`, Button details.
+    pub const fn button(x: u8, y: u8, param: &'static str, mode: &'static str) -> Self {
+        Self {
+            kind: WidgetKind::Button { mode },
+            x,
+            y,
+            bind: param,
+        }
+    }
+
     /// Width and height in grid units.
     pub const fn size(&self) -> (u8, u8) {
         match self.kind {
             WidgetKind::Knob => (3, 3),
             WidgetKind::Meter => (3, 6),
             WidgetKind::Toggle | WidgetKind::Light => (3, 2),
+            WidgetKind::Button { .. } => (6, 3),
             WidgetKind::Radio { options } => (3, options.len() as u8 + 1),
         }
     }
@@ -460,6 +476,14 @@ pub enum WidgetKind {
     /// The level of one of the module's outputs, from a port probe: an RMS
     /// bar and a peak line, -60 dB to 0 dB.
     Meter,
+    /// A large button for a whole-number parameter from 0 to 1.
+    ///
+    /// `mode` names the parameter that chooses the gesture. It is not the
+    /// value the button shows.
+    Button {
+        /// Whole-number parameter: 0 flips on press, 1 holds while pressed.
+        mode: &'static str,
+    },
 }
 
 impl ModuleDescriptor {
@@ -497,6 +521,16 @@ impl ModuleDescriptor {
                 let Some(index) = self.param_index(widget.bind) else {
                     return Err(name("no such parameter"));
                 };
+                // Looked up before `param` is borrowed: a button names a
+                // second parameter, and the two borrows cannot overlap.
+                let mode_is_integer = if let WidgetKind::Button { mode } = widget.kind {
+                    let Some(mode_index) = self.param_index(mode) else {
+                        return Err(name("no such mode parameter"));
+                    };
+                    Some(self.params[mode_index].options.integer)
+                } else {
+                    None
+                };
                 let param = &self.params[index];
                 let values = param.max - param.min + 1.0;
                 let integer = param.options.integer;
@@ -508,6 +542,12 @@ impl ModuleDescriptor {
                         return Err(name(
                             "radio buttons need a whole-number parameter with one value per option",
                         ));
+                    }
+                    WidgetKind::Button { .. } if !(integer && param.min == 0.0 && param.max == 1.0) => {
+                        return Err(name("a button needs a whole-number parameter from 0 to 1"));
+                    }
+                    WidgetKind::Button { .. } if mode_is_integer == Some(false) => {
+                        return Err(name("mode must be a whole-number parameter"));
                     }
                     _ => {}
                 }

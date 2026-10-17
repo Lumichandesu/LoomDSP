@@ -139,17 +139,18 @@ The first display module.
 
 - A `ModuleDescriptor` has a `panel`: its size in grid units (width and height), and a list of widgets. A module with nothing on its tile has an empty panel.
 - Each widget has a kind, a grid position inside the panel, and a binding by name: a parameter for controls, a display value for lights. *Why names:* parameter names are stable IDs (AGENTS.md rule 5), and the P2 panel editor will save bindings the same way.
-- P1 widgets, each 3 grid units wide:
+- P1 widgets. Most are 3 grid units wide. The button is wider, so a performance control can be large.
 
 | Widget | Size (grid units) | Binds to | Behaviour |
 |---|---|---|---|
 | Knob | 3 × 3 | Any parameter | A dial with its label below. Uses the parameter's mapping (`ParamSpec::normalize`). |
 | Toggle | 3 × 2 | A whole-number parameter from 0 to 1 | Off or on, with its label below. |
 | Radio buttons | 3 × (options + 1) | A whole-number parameter with exactly one value per option | One row per option, top option = minimum value. Label above. |
+| Button | 6 × 3 | A whole-number parameter from 0 to 1, and names a whole-number `mode` parameter | A large button. Its fill shows the bound parameter. Gestures are under [Interaction](#interaction-68). |
 | Light | 3 × 2 | A display value | Brightness is the value clamped to 0 to 1. Label below. |
 
 - **The registry refuses a panel that does not fit its module:** a binding to a parameter or display value the module does not have, a toggle or radio on a parameter that does not match it, a widget outside the panel, or two widgets that overlap. *Why:* a third-party module gets the same checks as a built-in one, at registration, not as a broken tile later.
-- **Built-in panels:** a knob for every parameter except the noise seed and MIDI Note's channel and bend range, which stay in the inspector. MIDI Note has a light for its gate, and ADSR a light for its level. Toggle and radio buttons are built and tested, but no P1 module uses them yet.
+- **Built-in panels:** a knob for every parameter except the noise seed, MIDI Note's channel and bend range, and Button's `mode`, which stay in the inspector. Button's `on` is the button, not a knob. MIDI Note has a light for its gate, and ADSR a light for its level. Toggle and radio buttons are built and tested, but no P1 module uses them yet.
 
 ### Display values ([#69](https://github.com/brylie/LoomDSP/issues/69))
 
@@ -184,7 +185,8 @@ The first display module.
 
 - Knob drags work in the control's 0 to 1 range, through the parameter's mapping, so a logarithmic cutoff moves by equal intervals.
 - Editing a control selects its module, so the inspector follows.
-- **Keyboard:** with a module selected, Tab moves focus to its next control and Shift-Tab to the previous one. Up and Right raise the value by 1% of the range, Down and Left lower it; with Shift, 0.1%. Whole-number parameters step by 1. Space or Enter toggles or picks the next option. Escape clears the focus. A control focused with Tab has a visible ring (NFR-UX-01). The ring goes around the control itself, not its caption, so the value shown there stays clear. A click or drag also focuses the control, so the arrow keys work after it, but shows no ring, as `:focus-visible` works on the web. *Why:* after a mouse gesture the pointer already shows where the user is, and a ring around the whole cell cut through the value text ([#92](https://github.com/brylie/LoomDSP/issues/92)).
+- **Button** ([#75](https://github.com/brylie/LoomDSP/issues/75)). Pointer down acts at once, in both modes, and does not move the tile. Drag the tile from its header. In toggle mode a press flips the bound parameter, and a double-click is two flips, not a reset. In momentary mode the parameter is 1 while the pointer or Space or Enter is held, and 0 on release, including when the pointer has left the button. The `mode` parameter chooses the gesture. Arrow keys set 0 or 1 in toggle mode and do nothing in momentary mode. A repeated key event does nothing. The rules are in [clock.md](clock.md#button-details).
+- **Keyboard:** with a module selected, Tab moves focus to its next control and Shift-Tab to the previous one. Up and Right raise the value by 1% of the range, Down and Left lower it; with Shift, 0.1%. Whole-number parameters step by 1. Space or Enter toggles or picks the next option. When a control is focused, Space and Enter act on it and do not toggle Run. Space toggles Run only when no panel control is focused ([clock.md](clock.md#controls-live-on-the-transport-module)). Escape clears the focus. A control focused with Tab has a visible ring (NFR-UX-01). The ring goes around the control itself, not its caption, so the value shown there stays clear. A click or drag also focuses the control, so the arrow keys work after it, but shows no ring, as `:focus-visible` works on the web. *Why:* after a mouse gesture the pointer already shows where the user is, and a ring around the whole cell cut through the value text ([#92](https://github.com/brylie/LoomDSP/issues/92)).
 - While a knob is dragged or focused, its label shows the value with its unit.
 - *Why the wheel always zooms:* scrolling over a tile to zoom must never change the sound by accident.
 
@@ -197,7 +199,7 @@ The canvas already hides port labels and titles below a size on screen. Panels u
 | Zoom | Controls and lights | Text |
 |---|---|---|
 | Port labels shown | Full widgets, with labels and values | All text |
-| Titles shown, port labels hidden | Shapes only: knob and value arc, toggle and light states | Titles. Port labels and captions are bars. |
+| Titles shown, port labels hidden | Shapes only: knob and value arc, toggle, button, and light states | Titles. Port labels and captions are bars. |
 | Titles hidden | Not drawn | Titles and port labels are bars |
 
 - **Text too small to read leaves a faint bar.** A rounded bar, as wide as the text and half as tall as its letters, sits where the text would be. *Why:* a tile that loses all its text looks empty from far out, but a real panel seen from across a room still shows where things are written ([#92](https://github.com/brylie/LoomDSP/issues/92)). Text that small cannot be read anyway, and drawing it would mean thousands of glyph layouts in a large patch.
@@ -303,7 +305,7 @@ A user zooms in on Clock Divide. The knob says "Division", not `n`. They rest th
 | Place | Showed before | Shows now |
 |---|---|---|
 | Port label on a tile | name | label, cut with "…" to fit its column as now |
-| Caption of a knob, toggle, or radio group | parameter name | parameter label, cut with "…" to fit the widget |
+| Caption of a knob, toggle, button, or radio group | parameter name | parameter label, cut with "…" to fit the widget |
 | Caption of a meter | output name | output label |
 | Caption of a light | display value name | display value name (display values have no label yet) |
 | Inspector parameter row | name | label |

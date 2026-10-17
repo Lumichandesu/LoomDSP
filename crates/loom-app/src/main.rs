@@ -347,7 +347,18 @@ impl App {
 
     /// Sets a parameter from a control on a tile or in the inspector.
     fn set_param(&mut self, module: u32, index: usize, value: f32) {
+        let clear_on = self.controller.graph().node(ModuleId(module)).and_then(|node| {
+            let spec = node.descriptor.params.get(index)?;
+            let next = spec.clamp(value);
+            scene::switches_button_to_momentary(node.descriptor.id, spec.name, node.params[index], next)
+                .then(|| node.descriptor.param_index("on"))
+                .flatten()
+        });
         if let Err(e) = self.controller.set_param(ModuleId(module), index, value) {
+            self.status = format!("error: {e}");
+        } else if let Some(on) = clear_on
+            && let Err(e) = self.controller.set_param(ModuleId(module), on, 0.0)
+        {
             self.status = format!("error: {e}");
         }
         self.refresh_values();

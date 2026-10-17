@@ -6,7 +6,7 @@
 //! listen to them, and commit them.
 
 use loom_core::{MidiEvent, ModuleRole};
-use loom_modules::{ALL, display, env, filter, logic, math, midi, osc, phase};
+use loom_modules::{ALL, display, env, filter, logic, math, midi, osc, phase, ui};
 use loom_test::{Harness, Signal, reference};
 
 #[test]
@@ -175,6 +175,16 @@ fn phase_trigger() {
 }
 
 #[test]
+fn button() {
+    // The gate is the `on` parameter, held for the whole render.
+    let render = Harness::new(&ui::BUTTON)
+        .seconds(0.02)
+        .param("on", 1.0)
+        .check(reference!("button"));
+    assert!(render.output("gate").iter().all(|&sample| sample == 1.0));
+}
+
+#[test]
 fn every_dsp_module_has_a_reference_test() {
     // Add a test above when you add a module to `ALL`.
     let tested = [
@@ -191,6 +201,7 @@ fn every_dsp_module_has_a_reference_test() {
         &midi::NOTE_IN,
         &display::METER,
         &logic::DIVIDE,
+        &ui::BUTTON,
     ]
     .map(|descriptor| descriptor.id);
     for descriptor in ALL {

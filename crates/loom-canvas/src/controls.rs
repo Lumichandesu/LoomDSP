@@ -21,11 +21,16 @@ const KNOB_RADIUS: f32 = 9.0;
 /// The live value of one widget.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct WidgetValue {
-    /// Knob: position from 0 to 1. Toggle: 0 or 1. Radio: option index.
-    /// Light: brightness from 0 to 1. Meter: RMS level from 0 to 1.
+    /// Knob: position from 0 to 1. Toggle and button: 0 or 1. Radio: option
+    /// index. Light: brightness from 0 to 1. Meter: RMS level from 0 to 1.
     pub position: f32,
     /// Meter: peak level from 0 to 1. Unused by other widgets.
     pub peak: f32,
+    /// Button: 0 for toggle, 1 for momentary. The canvas uses it to choose
+    /// the gesture. Other widgets leave it at 0. It is the parameter value,
+    /// refreshed with the panel values, so a change does not wait for a
+    /// scene rebuild.
+    pub mode: f32,
     /// The value as text, with its unit, shown while a knob is dragged or
     /// focused.
     pub text: String,
@@ -71,6 +76,11 @@ impl PanelValues {
     /// The peak of a meter's value, or 0.
     pub fn peak(&self, module: u32, widget: usize) -> f32 {
         self.get(module, widget).map_or(0.0, |v| v.peak)
+    }
+
+    /// A button's mode: 0 for toggle, 1 for momentary. Other widgets are 0.
+    pub fn mode(&self, module: u32, widget: usize) -> f32 {
+        self.get(module, widget).map_or(0.0, |v| v.mode)
     }
 
     /// Changes whenever a value changes. Unique across all value sets.
@@ -162,6 +172,15 @@ impl ControlGeometry {
                         let fill = mix(palette.light_off, palette.light_on, b);
                         shapes.push(circle(light_centre(rect), 5.0, fill, palette.tile_border, 1.0));
                     }
+                    WidgetViewKind::Button => {
+                        let on = position > 0.5;
+                        let fill = if on {
+                            palette.control_value
+                        } else {
+                            palette.control_track
+                        };
+                        shapes.push(Shape::new(button_body(rect), 6.0, fill, Color::TRANSPARENT, 0.0));
+                    }
                     WidgetViewKind::Meter => {
                         let track = meter_track(rect);
                         shapes.push(Shape::new(track, 2.0, palette.light_off, palette.tile_border, 1.0));
@@ -249,6 +268,7 @@ pub(crate) fn focus_ring(kind: &WidgetViewKind, rect: Rectangle) -> (Rectangle, 
             )
         }
         WidgetViewKind::Toggle => (toggle_track(rect).expand(2.5), 8.0),
+        WidgetViewKind::Button => (button_body(rect).expand(2.5), 8.0),
         // The options, below the caption row.
         WidgetViewKind::Radio { .. } => (
             Rectangle::new(
@@ -261,6 +281,14 @@ pub(crate) fn focus_ring(kind: &WidgetViewKind, rect: Rectangle) -> (Rectangle, 
         // Displays never take focus.
         WidgetViewKind::Light | WidgetViewKind::Meter => (rect.expand(1.0), 4.0),
     }
+}
+
+/// The face of a button: the cell above its caption row.
+fn button_body(rect: Rectangle) -> Rectangle {
+    Rectangle::new(
+        Point::new(rect.x + 4.0, rect.y + 2.0),
+        Size::new(rect.width - 8.0, rect.height - GRID - 4.0),
+    )
 }
 
 /// The track of a toggle switch: in the top row of its 3 × 2 cell.

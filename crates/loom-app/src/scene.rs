@@ -74,6 +74,7 @@ fn panel_view(d: &ModuleDescriptor) -> PanelView {
                 WidgetKind::Radio { options } => WidgetViewKind::Radio {
                     options: options.iter().map(|o| o.to_string()).collect(),
                 },
+                WidgetKind::Button { .. } => WidgetViewKind::Button,
                 // Light, and any kind this app does not draw yet.
                 _ => WidgetViewKind::Light,
             };
@@ -137,10 +138,17 @@ pub fn update_panel_values(
                 Some(p) if w.is_control() => {
                     let spec = &d.params[p];
                     let value = node.params[p];
+                    let mode = match w.kind {
+                        WidgetKind::Button { mode } => {
+                            d.param_index(mode).map(|index| node.params[index]).unwrap_or(0.0)
+                        }
+                        _ => 0.0,
+                    };
                     WidgetValue {
                         position: control_position(w.kind, spec, value),
                         peak: 0.0,
                         text: crate::param::format(spec, value),
+                        mode,
                     }
                 }
                 _ => {
@@ -149,6 +157,7 @@ pub fn update_panel_values(
                         position,
                         peak,
                         text: String::new(),
+                        mode: 0.0,
                     }
                 }
             };
@@ -181,6 +190,15 @@ pub fn meter_outputs(controller: &Controller, modules: &[u32]) -> Vec<((u32, usi
                 })
         })
         .collect()
+}
+
+/// True when an edit switches a Button from Toggle to Momentary.
+///
+/// The editor then sets `on` to 0, so a latched gate does not stay high
+/// with nobody holding the button (clock.md, Button details). Setting
+/// Momentary again, while it is already Momentary, does not clear a hold.
+pub fn switches_button_to_momentary(module_id: &str, param: &str, previous: f32, next: f32) -> bool {
+    module_id == "loom.ui.button" && param == "mode" && previous != 1.0 && next == 1.0
 }
 
 /// The parameter a control is bound to, if the module and widget exist.
@@ -257,6 +275,15 @@ mod tests {
         assert!((value - 632.46).abs() < 0.1, "{value}");
         let back = control_position(WidgetKind::Knob, &CUTOFF, value);
         assert!((back - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn switching_a_button_to_momentary_clears_its_gate() {
+        assert!(switches_button_to_momentary("loom.ui.button", "mode", 0.0, 1.0));
+        assert!(!switches_button_to_momentary("loom.ui.button", "mode", 1.0, 1.0));
+        assert!(!switches_button_to_momentary("loom.ui.button", "mode", 1.0, 0.0));
+        assert!(!switches_button_to_momentary("loom.ui.button", "on", 0.0, 1.0));
+        assert!(!switches_button_to_momentary("loom.math.constant", "mode", 0.0, 1.0));
     }
 
     #[test]

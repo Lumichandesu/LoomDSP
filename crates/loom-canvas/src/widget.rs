@@ -56,8 +56,8 @@ pub enum CanvasEvent {
     /// Delete modules.
     Delete(Vec<u32>),
     /// Set a control on a module's panel. `position` is the knob position
-    /// from 0 to 1, 0 or 1 for a toggle, or the option index for radio
-    /// buttons.
+    /// from 0 to 1, 0 or 1 for a toggle or a button, or the option index
+    /// for radio buttons.
     SetControl {
         /// Module ID.
         module: u32,
@@ -157,6 +157,12 @@ enum Interaction {
         last_y: f32,
         position: f32,
     },
+    /// A momentary button is held. Pointer up sets it off, wherever the
+    /// pointer is. The tile does not move.
+    Holding {
+        module: u32,
+        widget: usize,
+    },
     Wiring {
         from: PortRef,
     },
@@ -191,6 +197,8 @@ struct State {
     hover_text: HoverTimer,
     /// The last press on a control, for double-click.
     last_click: Option<(Instant, u32, usize)>,
+    /// A momentary button held from the keyboard. Key up sets it off.
+    key_hold: Option<(u32, usize)>,
     /// Modules with lights on screen, as last reported.
     reported_lights: Option<Vec<u32>>,
 }
@@ -257,6 +265,7 @@ where
         match state.interaction {
             Interaction::Panning { .. } | Interaction::Moving { .. } => mouse::Interaction::Grabbing,
             Interaction::Turning { .. } => mouse::Interaction::ResizingVertically,
+            Interaction::Holding { .. } => mouse::Interaction::Pointer,
             Interaction::Wiring { .. } => mouse::Interaction::Crosshair,
             Interaction::Selecting { .. } => mouse::Interaction::Crosshair,
             Interaction::Idle if cursor.is_over(layout.bounds()) => match state.hover {
@@ -385,8 +394,12 @@ impl<Message> PatchCanvas<'_, Message> {
             Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
                 state.modifiers = *modifiers;
             }
-            Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
-                if self.focus_keys(state, key, *modifiers, over, shell) => {}
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key, modifiers, repeat, ..
+            }) if self.focus_keys(state, key, *modifiers, *repeat, over, shell) => {}
+            Event::Keyboard(keyboard::Event::KeyReleased { key, .. }) => {
+                self.release_key(state, key, shell);
+            }
             Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) if over => {
                 use keyboard::key::Named;
                 match key.as_ref() {
@@ -455,7 +468,6 @@ impl<Message> PatchCanvas<'_, Message> {
                 state.cursor = Some(world);
                 let mut redraw = false;
                 match &mut state.interaction {
-                    Interaction::Idle => {}
                     Interaction::Panning { last } => {
                         let delta = screen - *last;
                         *last = screen;
@@ -492,6 +504,7 @@ impl<Message> PatchCanvas<'_, Message> {
                             self.emit(shell, event);
                         }
                     }
+                    Interaction::Holding { .. } | Interaction::Idle => {}
                     Interaction::Wiring { .. } => redraw = true,
                     Interaction::Selecting { current, .. } => {
                         *current = world;
@@ -548,6 +561,9 @@ impl<Message> PatchCanvas<'_, Message> {
                             },
                         );
                     }
+                    Interaction::Holding { module, widget } => {
+                        self.set_control(shell, module, widget, 0.0);
+                    }
                     Interaction::Idle
                     | Interaction::Panning { .. }
                     | Interaction::Moving { .. }
@@ -555,8 +571,13 @@ impl<Message> PatchCanvas<'_, Message> {
                 }
                 shell.request_redraw();
             }
-            Event::Mouse(mouse::Event::CursorLeft) if state.hover.take().is_some() => {
-                shell.request_redraw();
+            Event::Mouse(mouse::Event::CursorLeft) => {
+                if let Interaction::Holding { module, widget } = std::mem::take(&mut state.interaction) {
+                    self.set_control(shell, module, widget, 0.0);
+                }
+                if state.hover.take().is_some() {
+                    shell.request_redraw();
+                }
             }
             _ => {}
         }
@@ -633,6 +654,22 @@ impl<Message> PatchCanvas<'_, Message> {
         self.values.map_or(0.0, |v| v.position(module, widget))
     }
 
+    /// True when a button's mode parameter is Momentary (1).
+    fn is_momentary(&self, module: u32, widget: usize) -> bool {
+        self.values.is_some_and(|v| v.mode(module, widget) >= 1.0)
+    }
+
+    /// Ends a momentary keyboard hold. A repeated key does not start one.
+    fn release_key(&self, state: &mut State, key: &keyboard::Key, shell: &mut Shell<'_, Message>) {
+        use keyboard::key::Named;
+        let space_or_enter = matches!(key.as_ref(), keyboard::Key::Named(Named::Space | Named::Enter));
+        if space_or_enter && let Some((module, widget)) = state.key_hold.take() {
+            self.set_control(shell, module, widget, 0.0);
+            shell.request_redraw();
+            shell.capture_event();
+        }
+    }
+
     /// Selects the module of a control being edited, so the inspector
     /// follows.
     fn select_for_edit(&self, module: u32, shell: &mut Shell<'_, Message>) {
@@ -652,6 +689,19 @@ impl<Message> PatchCanvas<'_, Message> {
         );
     }
 
+    /// Pointer down on a button. Toggle flips. Momentary goes high until
+    /// the pointer comes up, and the tile stays put either way.
+    fn press_button(&self, state: &mut State, module: u32, widget: usize, shell: &mut Shell<'_, Message>) {
+        if self.is_momentary(module, widget) {
+            self.set_control(shell, module, widget, 1.0);
+            state.interaction = Interaction::Holding { module, widget };
+        } else {
+            let position = self.position(module, widget);
+            let next = if position > 0.5 { 0.0 } else { 1.0 };
+            self.set_control(shell, module, widget, next);
+        }
+    }
+
     /// The keyboard path to panel controls (NFR-UX-01). Returns true if the
     /// key was used.
     fn focus_keys(
@@ -659,6 +709,7 @@ impl<Message> PatchCanvas<'_, Message> {
         state: &mut State,
         key: &keyboard::Key,
         modifiers: keyboard::Modifiers,
+        repeat: bool,
         over: bool,
         shell: &mut Shell<'_, Message>,
     ) -> bool {
@@ -712,6 +763,15 @@ impl<Message> PatchCanvas<'_, Message> {
                             0.0
                         }
                     }
+                    // Momentary arrows do nothing. Toggle arrows set the gate.
+                    Some(WidgetViewKind::Button) if self.is_momentary(module, widget) => position,
+                    Some(WidgetViewKind::Button) => {
+                        if up {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
                     Some(WidgetViewKind::Radio { options }) => {
                         let last = options.len().saturating_sub(1) as f32;
                         (position.round() + if up { 1.0 } else { -1.0 }).clamp(0.0, last)
@@ -731,6 +791,14 @@ impl<Message> PatchCanvas<'_, Message> {
                 match self.widget_kind(module, widget) {
                     Some(WidgetViewKind::Toggle) => {
                         self.set_control(shell, module, widget, if position > 0.5 { 0.0 } else { 1.0 })
+                    }
+                    Some(WidgetViewKind::Button) if repeat => {}
+                    Some(WidgetViewKind::Button) if self.is_momentary(module, widget) => {
+                        self.set_control(shell, module, widget, 1.0);
+                        state.key_hold = Some((module, widget));
+                    }
+                    Some(WidgetViewKind::Button) => {
+                        self.set_control(shell, module, widget, if position > 0.5 { 0.0 } else { 1.0 });
                     }
                     Some(WidgetViewKind::Radio { options }) => {
                         let next = (position.round() as usize + 1) % options.len().max(1);
@@ -765,12 +833,19 @@ impl<Message> PatchCanvas<'_, Message> {
                 let double = state
                     .last_click
                     .is_some_and(|(at, m, w)| m == module && w == widget && now - at < DOUBLE_CLICK);
-                if double {
+                // A button's second press is another press. Other controls
+                // reset to the default (panels.md, Interaction).
+                let button = matches!(self.widget_kind(module, widget), Some(WidgetViewKind::Button));
+                if double && !button {
                     state.last_click = None;
                     self.emit(shell, CanvasEvent::ResetControl { module, widget });
                     return;
                 }
                 state.last_click = Some((now, module, widget));
+                if button {
+                    self.press_button(state, module, widget, shell);
+                    return;
+                }
                 let position = self.position(module, widget);
                 let click = match self.widget_kind(module, widget) {
                     Some(WidgetViewKind::Knob { .. }) => {
@@ -1253,6 +1328,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::controls::WidgetValue;
     use crate::scene::{CableView, ModuleView, PanelView, PortShape, PortView, WidgetView};
 
     fn module(id: u32, x: f32) -> ModuleView {
@@ -1578,5 +1654,131 @@ mod tests {
             ..State::default()
         };
         assert_eq!(canvas.overlay(&state).cables.len(), 1);
+    }
+
+    fn button_module() -> ModuleView {
+        let mut module = module(1, 0.0);
+        module.panel = PanelView {
+            width: 6,
+            height: 3,
+            widgets: vec![widget(WidgetViewKind::Button, 0)],
+        };
+        module
+    }
+
+    fn button_values(position: f32, mode: f32) -> PanelValues {
+        let mut values = PanelValues::new();
+        values.set(
+            1,
+            0,
+            WidgetValue {
+                position,
+                mode,
+                ..WidgetValue::default()
+            },
+        );
+        values
+    }
+
+    fn drive(canvas: &PatchCanvas<'_, CanvasEvent>, state: &mut State, event: &Event, at: Point) -> Vec<CanvasEvent> {
+        let bounds = Rectangle::new(Point::ORIGIN, Size::new(800.0, 600.0));
+        let mut messages = Vec::new();
+        let mut shell = Shell::new(&mut messages);
+        canvas.handle(state, event, bounds, mouse::Cursor::Available(at), &mut shell);
+        messages
+    }
+
+    fn click(button: mouse::Button) -> Event {
+        Event::Mouse(mouse::Event::ButtonPressed(button))
+    }
+
+    /// A toggle press flips the gate. A second press, once the value has
+    /// updated, flips it back. Neither press resets it.
+    #[test]
+    fn a_toggle_button_flips_on_press() {
+        let scene = Scene::new(vec![button_module()], Vec::new());
+        let centre = scene.module(1).unwrap().widget_bounds(0).unwrap().center();
+        let selected = BTreeSet::from([1]);
+        let values = button_values(0.0, 0.0);
+        let canvas = PatchCanvas::new(&scene, &selected, |e| e).values(&values);
+        let mut state = State::default();
+        let first = drive(&canvas, &mut state, &click(mouse::Button::Left), centre);
+        assert_eq!(
+            first,
+            vec![CanvasEvent::SetControl {
+                module: 1,
+                widget: 0,
+                position: 1.0,
+            }]
+        );
+        assert!(matches!(state.interaction, Interaction::Idle));
+
+        let values = button_values(1.0, 0.0);
+        let canvas = PatchCanvas::new(&scene, &selected, |e| e).values(&values);
+        let second = drive(&canvas, &mut state, &click(mouse::Button::Left), centre);
+        assert_eq!(
+            second,
+            vec![CanvasEvent::SetControl {
+                module: 1,
+                widget: 0,
+                position: 0.0,
+            }]
+        );
+        assert!(
+            second
+                .iter()
+                .all(|event| !matches!(event, CanvasEvent::ResetControl { .. }))
+        );
+    }
+
+    /// Momentary goes high on press and low on release, even outside the
+    /// button. Dragging does not move the tile.
+    #[test]
+    fn a_momentary_button_is_high_only_while_held() {
+        let scene = Scene::new(vec![button_module()], Vec::new());
+        let centre = scene.module(1).unwrap().widget_bounds(0).unwrap().center();
+        let outside = Point::new(centre.x + 400.0, centre.y);
+        let selected = BTreeSet::from([1]);
+        let values = button_values(0.0, 1.0);
+        let canvas = PatchCanvas::new(&scene, &selected, |e| e).values(&values);
+        let mut state = State::default();
+
+        let down = drive(&canvas, &mut state, &click(mouse::Button::Left), centre);
+        assert_eq!(
+            down,
+            vec![CanvasEvent::SetControl {
+                module: 1,
+                widget: 0,
+                position: 1.0,
+            }]
+        );
+        assert!(matches!(
+            state.interaction,
+            Interaction::Holding { module: 1, widget: 0 }
+        ));
+
+        let moved = drive(
+            &canvas,
+            &mut state,
+            &Event::Mouse(mouse::Event::CursorMoved { position: outside }),
+            outside,
+        );
+        assert!(moved.iter().all(|event| !matches!(event, CanvasEvent::Move { .. })));
+
+        let up = drive(
+            &canvas,
+            &mut state,
+            &Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+            outside,
+        );
+        assert_eq!(
+            up,
+            vec![CanvasEvent::SetControl {
+                module: 1,
+                widget: 0,
+                position: 0.0,
+            }]
+        );
+        assert!(matches!(state.interaction, Interaction::Idle));
     }
 }

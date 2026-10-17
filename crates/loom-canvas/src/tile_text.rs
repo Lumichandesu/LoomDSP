@@ -135,6 +135,7 @@ pub fn for_each<'a>(module: &'a ModuleView, mut f: impl FnMut(TextItem<'a>)) {
             WidgetViewKind::Knob { .. } => knob_centre(rect).y + 1.5 * GRID,
             WidgetViewKind::Meter => rect.y + rect.height - GRID * 0.5,
             WidgetViewKind::Toggle | WidgetViewKind::Light => light_centre(rect).y + GRID,
+            WidgetViewKind::Button => rect.y + rect.height - GRID * 0.5,
             WidgetViewKind::Radio { .. } => rect.y + GRID * 0.5,
         };
         f(TextItem {
