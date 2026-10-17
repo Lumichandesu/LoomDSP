@@ -22,15 +22,15 @@ We write the specification before the code, and keep it true as the code is buil
 
 An issue is ready to build when all of these hold:
 
-1. **Behaviour is agreed.** The issue links to a spec section marked Agreed. A new module names its catalogue ID instead, and the issue lists its ports, parameters (with ranges and defaults), and panel, matching the catalogue entry. A module that brings new rules (a new widget, a new gesture, new engine behaviour) needs a spec section as well.
+1. **Behaviour is agreed.** The issue links to a spec section marked Agreed. A new module names its catalogue ID instead, and the issue lists its ports, parameters (with ranges and defaults), and panel, agreed in the issue and matching the catalogue entry. A module that brings new rules (a new widget, a new gesture, new engine behaviour) needs a spec section as well.
 2. **The phase matches.** The milestone is the phase the catalogue or the requirement gives.
 3. **Done when.** The issue lists its checks. Each is a test or a named manual check.
 4. **Open questions are listed,** or the issue says "None".
-5. **The issue links to rules and does not copy them.** It names the spec section and says what is in and out of this issue's scope.
+5. **The issue links to rules and does not copy them.** It names the spec section, or the catalogue entry for a module that brings no new rules, and says what is in and out of this issue's scope.
 
 Until all five hold, the issue carries `needs spec agreed` and does not carry `good first issue` or `hacktoberfest`.
 
-When a spec section becomes Agreed, the same pull request updates every issue that links to it: remove the label, and cut any rules the issue still copies.
+When a spec section becomes Agreed, the same pull request updates every issue that links to it: cut any rules the issue still copies, and remove `needs spec agreed` only when all five checks hold.
 
 If an issue and its spec disagree, the spec wins. Say so in the pull request, and fix the issue.
 
