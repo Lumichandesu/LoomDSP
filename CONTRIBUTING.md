@@ -10,7 +10,7 @@ Thank you for helping. This guide explains how to build, test, and send changes.
 - Big design changes need an [ADR](docs/adr/README.md) first. The ADR records the decision only. Details that will change (ports, parameters, examples) go in a [design specification](docs/design/README.md), which you update with the code. See [kinds of documents](docs/README.md#kinds-of-documents).
 - AI-assisted contributions are welcome. Read the [AI contribution policy](AI_POLICY.md).
 
-Good starting points: issues labelled [`good first issue`](https://github.com/brylie/LoomDSP/labels/good%20first%20issue) or [`help wanted`](https://github.com/brylie/LoomDSP/labels/help%20wanted). New modules are often a good first contribution: they are small, self-contained, and easy to test. The current phase's work is in the [P1 milestone](https://github.com/brylie/LoomDSP/milestone/1), roughly in priority order.
+Good starting points: issues labelled [`good first issue`](https://github.com/brylie/LoomDSP/labels/good%20first%20issue) or [`help wanted`](https://github.com/brylie/LoomDSP/labels/help%20wanted). New modules are often a good first contribution: they are small, self-contained, and easy to test. Pick an issue without `needs spec agreed`: the others still have open questions ([ready to build](docs/design/README.md#ready-to-build)). The current phase's work is in the [P1 milestone](https://github.com/brylie/LoomDSP/milestone/1), roughly in priority order.
 
 To understand the code first, read [docs/dev/architecture.md](docs/dev/architecture.md).
 
@@ -22,6 +22,7 @@ To understand the code first, read [docs/dev/architecture.md](docs/dev/architect
 | Area | `area:engine`, `area:modules`, `area:ui`, `area:midi`, `area:crates`, `area:infra`, `area:export` |
 | Priority | `must`, `should`, `could` (same as the requirement priority) |
 | Newcomers | `good first issue`, `help wanted`, `hacktoberfest` |
+| Readiness | `needs spec agreed`: not ready to build yet (see [Ready to build](docs/design/README.md#ready-to-build)) |
 
 Comment on an issue before you start, so two people do not do the same work.
 
