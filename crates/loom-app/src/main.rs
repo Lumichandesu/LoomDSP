@@ -763,16 +763,23 @@ impl App {
                                 (false, Some(control)) => control.to_string(),
                                 (false, None) => param::format(spec, *value),
                             };
-                            items = items.push(
-                                button(row![
-                                    text(spec.label).size(12),
-                                    space::horizontal(),
-                                    text(detail).size(12)
-                                ])
-                                .width(Length::Fill)
-                                .style(if armed { button::primary } else { button::secondary })
-                                .on_press(Message::LearnParam { module: id, index }),
-                            );
+                            let arm = button(row![
+                                text(spec.label).size(12),
+                                space::horizontal(),
+                                text(detail).size(12)
+                            ])
+                            .width(Length::Fill)
+                            .style(if armed { button::primary } else { button::secondary })
+                            .on_press(Message::LearnParam { module: id, index });
+                            // A mapping can be removed in learn mode too.
+                            let mut line = row![arm].spacing(4).align_y(iced::Alignment::Center);
+                            if mapping.is_some() {
+                                line = line.push(remove_button(
+                                    "Remove MIDI mapping",
+                                    Message::Unmap { module: id, index },
+                                ));
+                            }
+                            items = items.push(line);
                             continue;
                         }
                         let mut row_items = column![
