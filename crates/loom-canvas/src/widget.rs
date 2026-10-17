@@ -57,7 +57,7 @@ pub enum CanvasEvent {
     Delete(Vec<u32>),
     /// Set a control on a module's panel. `position` is the knob position
     /// from 0 to 1, 0 or 1 for a toggle, or the option index for radio
-    /// buttons.
+    /// buttons. A button reports [`CanvasEvent::ButtonPressed`] instead.
     SetControl {
         /// Module ID.
         module: u32,
@@ -65,6 +65,36 @@ pub enum CanvasEvent {
         widget: usize,
         /// The new position.
         position: f32,
+    },
+    /// A button was pressed, by the pointer or by Space or Enter.
+    ///
+    /// The app decides the parameter value from the button's mode. The
+    /// canvas does not.
+    ButtonPressed {
+        /// Module ID.
+        module: u32,
+        /// Index in the module's panel widgets.
+        widget: usize,
+    },
+    /// A button hold ended.
+    ///
+    /// Pointer up sends this, including after the pointer has left the
+    /// button. So does another mouse button, key up, and the window losing
+    /// focus. The app ignores it for a toggle and clears a momentary gate.
+    ButtonReleased {
+        /// Module ID.
+        module: u32,
+        /// Index in the module's panel widgets.
+        widget: usize,
+    },
+    /// An arrow key on a focused button. `high` is up or right.
+    ButtonArrow {
+        /// Module ID.
+        module: u32,
+        /// Index in the module's panel widgets.
+        widget: usize,
+        /// Up or right. Down or left is false.
+        high: bool,
     },
     /// Reset a control to its parameter's default (double-click).
     ResetControl {
@@ -84,6 +114,10 @@ pub enum CanvasEvent {
         /// Index in the module's panel widgets.
         widget: usize,
     },
+    /// Space was pressed and no panel control is focused. The app toggles
+    /// transport Run. Enter does not send this, and neither does Space while
+    /// a control is focused.
+    ToggleRun,
 }
 
 /// What MIDI learn mode shows on the canvas. While the canvas has one, a
@@ -184,6 +218,13 @@ enum Interaction {
         last_y: f32,
         position: f32,
     },
+    /// A button is held. Pointer up reports a release, wherever the pointer
+    /// is, so a release always follows the press. The tile does not move.
+    /// The app decides whether that release changes a parameter.
+    Holding {
+        module: u32,
+        widget: usize,
+    },
     Wiring {
         from: PortRef,
     },
@@ -218,6 +259,12 @@ struct State {
     hover_text: HoverTimer,
     /// The last press on a control, for double-click.
     last_click: Option<(Instant, u32, usize)>,
+    /// Buttons held from the keyboard, one slot for Space and one for Enter.
+    ///
+    /// Each key is its own hold. Releasing one leaves a button high while the
+    /// other key is still down on it. Replacing a key's hold releases the
+    /// button that key was holding, when nothing else is holding it.
+    key_holds: [Option<KeyHold>; 2],
     /// Modules with lights on screen, as last reported.
     reported_lights: Option<Vec<u32>>,
 }
@@ -229,6 +276,14 @@ impl State {
         // always grabs the tile, not a port.
         PORT_HIT_RADIUS.max(7.0 / self.camera.zoom).min(TILE_WIDTH * 0.25)
     }
+}
+
+/// One key holding one button down.
+#[derive(Clone, Copy)]
+struct KeyHold {
+    key: keyboard::key::Named,
+    module: u32,
+    widget: usize,
 }
 
 fn relative(cursor: mouse::Cursor, bounds: Rectangle) -> Option<Point> {
@@ -284,6 +339,7 @@ where
         match state.interaction {
             Interaction::Panning { .. } | Interaction::Moving { .. } => mouse::Interaction::Grabbing,
             Interaction::Turning { .. } => mouse::Interaction::ResizingVertically,
+            Interaction::Holding { .. } => mouse::Interaction::Pointer,
             Interaction::Wiring { .. } => mouse::Interaction::Crosshair,
             Interaction::Selecting { .. } => mouse::Interaction::Crosshair,
             Interaction::Idle if cursor.is_over(layout.bounds()) => match state.hover {
@@ -412,8 +468,12 @@ impl<Message> PatchCanvas<'_, Message> {
             Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
                 state.modifiers = *modifiers;
             }
-            Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
-                if self.focus_keys(state, key, *modifiers, over, shell) => {}
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key, modifiers, repeat, ..
+            }) if self.focus_keys(state, key, *modifiers, *repeat, over, shell) => {}
+            Event::Keyboard(keyboard::Event::KeyReleased { key, .. }) => {
+                self.release_key(state, key, shell);
+            }
             Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) if over => {
                 use keyboard::key::Named;
                 match key.as_ref() {
@@ -462,6 +522,9 @@ impl<Message> PatchCanvas<'_, Message> {
             }
             Event::Mouse(mouse::Event::ButtonPressed(button)) if over => {
                 let Some(screen) = screen else { return };
+                // A second button must end a hold. Replacing the interaction
+                // without a release would leave a momentary gate high.
+                self.release_pointer_hold(state, shell);
                 let world = state.camera.to_world(screen);
                 match button {
                     mouse::Button::Middle | mouse::Button::Right => {
@@ -470,7 +533,7 @@ impl<Message> PatchCanvas<'_, Message> {
                     mouse::Button::Left => {
                         self.press(state, world, screen, shell);
                     }
-                    _ => return,
+                    _ => {}
                 }
                 shell.request_redraw();
                 shell.capture_event();
@@ -482,7 +545,6 @@ impl<Message> PatchCanvas<'_, Message> {
                 state.cursor = Some(world);
                 let mut redraw = false;
                 match &mut state.interaction {
-                    Interaction::Idle => {}
                     Interaction::Panning { last } => {
                         let delta = screen - *last;
                         *last = screen;
@@ -519,6 +581,7 @@ impl<Message> PatchCanvas<'_, Message> {
                             self.emit(shell, event);
                         }
                     }
+                    Interaction::Holding { .. } | Interaction::Idle => {}
                     Interaction::Wiring { .. } => redraw = true,
                     Interaction::Selecting { current, .. } => {
                         *current = world;
@@ -534,7 +597,12 @@ impl<Message> PatchCanvas<'_, Message> {
                     shell.request_redraw();
                 }
             }
-            Event::Mouse(mouse::Event::ButtonReleased(_)) => {
+            Event::Mouse(mouse::Event::ButtonReleased(button)) => {
+                // The left button is what started the hold. Releasing another
+                // button, one that was already down, must not end it.
+                if *button != mouse::Button::Left && matches!(state.interaction, Interaction::Holding { .. }) {
+                    return;
+                }
                 let interaction = std::mem::take(&mut state.interaction);
                 let world = screen.map(|s| state.camera.to_world(s));
                 match interaction {
@@ -575,6 +643,11 @@ impl<Message> PatchCanvas<'_, Message> {
                             },
                         );
                     }
+                    Interaction::Holding { module, widget } => {
+                        if !Self::key_holds_button(state, module, widget) {
+                            self.emit(shell, CanvasEvent::ButtonReleased { module, widget });
+                        }
+                    }
                     Interaction::Idle
                     | Interaction::Panning { .. }
                     | Interaction::Moving { .. }
@@ -582,7 +655,17 @@ impl<Message> PatchCanvas<'_, Message> {
                 }
                 shell.request_redraw();
             }
-            Event::Mouse(mouse::Event::CursorLeft) if state.hover.take().is_some() => {
+            Event::Mouse(mouse::Event::CursorLeft) => {
+                self.release_pointer_hold(state, shell);
+                if state.hover.take().is_some() {
+                    shell.request_redraw();
+                }
+            }
+            Event::Window(window::Event::Unfocused) => {
+                // A key release never arrives if the window loses focus
+                // while Space or Enter is held. End every hold here.
+                self.release_pointer_hold(state, shell);
+                self.release_every_key_hold(state, shell);
                 shell.request_redraw();
             }
             _ => {}
@@ -660,6 +743,133 @@ impl<Message> PatchCanvas<'_, Message> {
         self.values.map_or(0.0, |v| v.position(module, widget))
     }
 
+    /// True when Space or Enter is still holding this button.
+    fn key_holds_button(state: &State, module: u32, widget: usize) -> bool {
+        state
+            .key_holds
+            .iter()
+            .flatten()
+            .any(|hold| hold.module == module && hold.widget == widget)
+    }
+
+    /// True when the pointer is still down on this button.
+    fn pointer_holds_button(state: &State, module: u32, widget: usize) -> bool {
+        matches!(
+            state.interaction,
+            Interaction::Holding {
+                module: held,
+                widget: held_widget,
+            } if held == module && held_widget == widget
+        )
+    }
+
+    /// Ends a pointer hold, if there is one. The release is reported only
+    /// when no key is still holding that button.
+    fn release_pointer_hold(&self, state: &mut State, shell: &mut Shell<'_, Message>) {
+        if let Interaction::Holding { module, widget } = state.interaction {
+            state.interaction = Interaction::Idle;
+            if !Self::key_holds_button(state, module, widget) {
+                self.emit(shell, CanvasEvent::ButtonReleased { module, widget });
+            }
+        }
+    }
+
+    /// Space or Enter, the keys that hold a button.
+    fn button_key(key: &keyboard::Key) -> Option<keyboard::key::Named> {
+        use keyboard::key::Named;
+        match key.as_ref() {
+            keyboard::Key::Named(named @ (Named::Space | Named::Enter)) => Some(named),
+            _ => None,
+        }
+    }
+
+    /// Starts a hold for one key. If that key was holding another button, and
+    /// nothing else is, that button is released first.
+    fn press_button_key(
+        &self,
+        state: &mut State,
+        key: keyboard::key::Named,
+        module: u32,
+        widget: usize,
+        shell: &mut Shell<'_, Message>,
+    ) {
+        let same = state
+            .key_holds
+            .iter()
+            .flatten()
+            .any(|hold| hold.key == key && hold.module == module && hold.widget == widget);
+        if same {
+            return;
+        }
+        self.release_button_key(state, key, shell);
+        self.emit(shell, CanvasEvent::ButtonPressed { module, widget });
+        if let Some(slot) = state.key_holds.iter_mut().find(|slot| slot.is_none()) {
+            *slot = Some(KeyHold { key, module, widget });
+        }
+    }
+
+    /// Ends one key's hold. The button stays down while another key holds it.
+    fn release_button_key(&self, state: &mut State, key: keyboard::key::Named, shell: &mut Shell<'_, Message>) {
+        let Some(index) = state
+            .key_holds
+            .iter()
+            .position(|slot| slot.is_some_and(|hold| hold.key == key))
+        else {
+            return;
+        };
+        let Some(hold) = state.key_holds[index].take() else {
+            return;
+        };
+        let still_held = Self::key_holds_button(state, hold.module, hold.widget)
+            || Self::pointer_holds_button(state, hold.module, hold.widget);
+        if !still_held {
+            self.emit(
+                shell,
+                CanvasEvent::ButtonReleased {
+                    module: hold.module,
+                    widget: hold.widget,
+                },
+            );
+            shell.request_redraw();
+            shell.capture_event();
+        }
+    }
+
+    /// Ends every keyboard hold. Used when the window loses focus, because
+    /// the key releases never arrive.
+    fn release_every_key_hold(&self, state: &mut State, shell: &mut Shell<'_, Message>) {
+        let holds = std::mem::take(&mut state.key_holds);
+        let mut reported = [(0_u32, 0_usize); 2];
+        let mut count = 0;
+        for hold in holds.into_iter().flatten() {
+            if reported[..count].contains(&(hold.module, hold.widget))
+                || Self::pointer_holds_button(state, hold.module, hold.widget)
+            {
+                continue;
+            }
+            reported[count] = (hold.module, hold.widget);
+            count += 1;
+            self.emit(
+                shell,
+                CanvasEvent::ButtonReleased {
+                    module: hold.module,
+                    widget: hold.widget,
+                },
+            );
+        }
+        if count > 0 {
+            shell.request_redraw();
+            shell.capture_event();
+        }
+    }
+
+    /// Ends the hold for the key that came up.
+    fn release_key(&self, state: &mut State, key: &keyboard::Key, shell: &mut Shell<'_, Message>) {
+        if let Some(named) = Self::button_key(key) {
+            self.release_button_key(state, named, shell);
+        }
+    }
+
     /// Selects the module of a control being edited, so the inspector
     /// follows.
     fn select_for_edit(&self, module: u32, shell: &mut Shell<'_, Message>) {
@@ -679,6 +889,13 @@ impl<Message> PatchCanvas<'_, Message> {
         );
     }
 
+    /// Pointer down on a button. The tile stays put. Pointer up reports a
+    /// release, whichever mode the app has stored.
+    fn press_button(&self, state: &mut State, module: u32, widget: usize, shell: &mut Shell<'_, Message>) {
+        self.emit(shell, CanvasEvent::ButtonPressed { module, widget });
+        state.interaction = Interaction::Holding { module, widget };
+    }
+
     /// The keyboard path to panel controls (NFR-UX-01). Returns true if the
     /// key was used.
     fn focus_keys(
@@ -686,6 +903,7 @@ impl<Message> PatchCanvas<'_, Message> {
         state: &mut State,
         key: &keyboard::Key,
         modifiers: keyboard::Modifiers,
+        repeat: bool,
         over: bool,
         shell: &mut Shell<'_, Message>,
     ) -> bool {
@@ -726,11 +944,12 @@ impl<Message> PatchCanvas<'_, Message> {
             }
             // In MIDI learn mode the keyboard arms the focused control, like
             // a click, and never changes a value (midi-learn.md).
-            keyboard::Key::Named(Named::Space | Named::Enter) if self.learn.is_some() => {
-                let Some((module, widget)) = state.focus else {
-                    return false;
-                };
-                self.emit(shell, CanvasEvent::Learn { module, widget });
+            // With nothing focused, Space still toggles Run below: that is
+            // the transport, not a parameter.
+            keyboard::Key::Named(Named::Space | Named::Enter) if self.learn.is_some() && state.focus.is_some() => {
+                if !repeat && let Some((module, widget)) = state.focus {
+                    self.emit(shell, CanvasEvent::Learn { module, widget });
+                }
                 true
             }
             keyboard::Key::Named(Named::ArrowUp | Named::ArrowRight | Named::ArrowDown | Named::ArrowLeft)
@@ -745,43 +964,69 @@ impl<Message> PatchCanvas<'_, Message> {
                     return false;
                 };
                 let up = matches!(named, Named::ArrowUp | Named::ArrowRight);
-                let position = self.position(module, widget);
-                let next = match self.widget_kind(module, widget) {
-                    Some(WidgetViewKind::Knob { steps }) => knob_step(position, up, modifiers.shift(), *steps),
-                    Some(WidgetViewKind::Toggle) => {
-                        if up {
-                            1.0
-                        } else {
-                            0.0
+                if matches!(self.widget_kind(module, widget), Some(WidgetViewKind::Button)) {
+                    self.emit(
+                        shell,
+                        CanvasEvent::ButtonArrow {
+                            module,
+                            widget,
+                            high: up,
+                        },
+                    );
+                } else {
+                    let position = self.position(module, widget);
+                    let next = match self.widget_kind(module, widget) {
+                        Some(WidgetViewKind::Knob { steps }) => knob_step(position, up, modifiers.shift(), *steps),
+                        Some(WidgetViewKind::Toggle) => {
+                            if up {
+                                1.0
+                            } else {
+                                0.0
+                            }
                         }
+                        Some(WidgetViewKind::Radio { options }) => {
+                            let last = options.len().saturating_sub(1) as f32;
+                            (position.round() + if up { 1.0 } else { -1.0 }).clamp(0.0, last)
+                        }
+                        _ => return false,
+                    };
+                    if next != position {
+                        self.set_control(shell, module, widget, next);
                     }
-                    Some(WidgetViewKind::Radio { options }) => {
-                        let last = options.len().saturating_sub(1) as f32;
-                        (position.round() + if up { 1.0 } else { -1.0 }).clamp(0.0, last)
-                    }
-                    _ => return false,
-                };
-                if next != position {
-                    self.set_control(shell, module, widget, next);
                 }
                 true
             }
-            keyboard::Key::Named(Named::Space | Named::Enter) => {
-                let Some((module, widget)) = state.focus else {
-                    return false;
-                };
-                let position = self.position(module, widget);
-                match self.widget_kind(module, widget) {
-                    Some(WidgetViewKind::Toggle) => {
-                        self.set_control(shell, module, widget, if position > 0.5 { 0.0 } else { 1.0 })
+            keyboard::Key::Named(named @ (Named::Space | Named::Enter)) => {
+                if let Some((module, widget)) = state.focus {
+                    let position = self.position(module, widget);
+                    match self.widget_kind(module, widget) {
+                        Some(WidgetViewKind::Toggle) => {
+                            self.set_control(shell, module, widget, if position > 0.5 { 0.0 } else { 1.0 })
+                        }
+                        // A repeated key must not press again. The first press is
+                        // still held, so key up can release it.
+                        Some(WidgetViewKind::Button) if repeat => {}
+                        Some(WidgetViewKind::Button) => {
+                            self.press_button_key(state, named, module, widget, shell);
+                        }
+                        Some(WidgetViewKind::Radio { options }) => {
+                            let next = (position.round() as usize + 1) % options.len().max(1);
+                            self.set_control(shell, module, widget, next as f32);
+                        }
+                        _ => {}
                     }
-                    Some(WidgetViewKind::Radio { options }) => {
-                        let next = (position.round() as usize + 1) % options.len().max(1);
-                        self.set_control(shell, module, widget, next as f32);
+                    true
+                } else if matches!(named, Named::Space) {
+                    // Space with nothing focused is the Run shortcut. A
+                    // repeat is swallowed so holding the key does not toggle
+                    // again. Enter is not that shortcut.
+                    if !repeat {
+                        self.emit(shell, CanvasEvent::ToggleRun);
                     }
-                    _ => {}
+                    true
+                } else {
+                    false
                 }
-                true
             }
             _ => false,
         };
@@ -815,12 +1060,19 @@ impl<Message> PatchCanvas<'_, Message> {
                 let double = state
                     .last_click
                     .is_some_and(|(at, m, w)| m == module && w == widget && now - at < DOUBLE_CLICK);
-                if double {
+                // A button's second press is another press. Other controls
+                // reset to the default (panels.md, Interaction).
+                let button = matches!(self.widget_kind(module, widget), Some(WidgetViewKind::Button));
+                if double && !button {
                     state.last_click = None;
                     self.emit(shell, CanvasEvent::ResetControl { module, widget });
                     return;
                 }
                 state.last_click = Some((now, module, widget));
+                if button {
+                    self.press_button(state, module, widget, shell);
+                    return;
+                }
                 let position = self.position(module, widget);
                 let click = match self.widget_kind(module, widget) {
                     Some(WidgetViewKind::Knob { .. }) => {
@@ -1660,5 +1912,421 @@ mod tests {
             ..State::default()
         };
         assert_eq!(canvas.overlay(&state).cables.len(), 1);
+    }
+
+    fn button_module() -> ModuleView {
+        let mut module = module(1, 0.0);
+        module.panel = PanelView {
+            width: 6,
+            height: 3,
+            widgets: vec![widget(WidgetViewKind::Button, 0)],
+        };
+        module
+    }
+
+    fn drive(canvas: &PatchCanvas<'_, CanvasEvent>, state: &mut State, event: &Event, at: Point) -> Vec<CanvasEvent> {
+        let bounds = Rectangle::new(Point::ORIGIN, Size::new(800.0, 600.0));
+        let mut messages = Vec::new();
+        let mut shell = Shell::new(&mut messages);
+        canvas.handle(state, event, bounds, mouse::Cursor::Available(at), &mut shell);
+        messages
+    }
+
+    fn click(button: mouse::Button) -> Event {
+        Event::Mouse(mouse::Event::ButtonPressed(button))
+    }
+
+    /// Pointer down reports a press and does not reset on a second press.
+    /// The app turns the press into a flip or a hold.
+    #[test]
+    fn a_button_reports_press_and_a_second_press_is_not_a_reset() {
+        let scene = Scene::new(vec![button_module()], Vec::new());
+        let centre = scene.module(1).unwrap().widget_bounds(0).unwrap().center();
+        let selected = BTreeSet::from([1]);
+        let canvas = PatchCanvas::new(&scene, &selected, |e| e);
+        let mut state = State::default();
+        let first = drive(&canvas, &mut state, &click(mouse::Button::Left), centre);
+        assert_eq!(first, vec![CanvasEvent::ButtonPressed { module: 1, widget: 0 }]);
+        assert!(matches!(
+            state.interaction,
+            Interaction::Holding { module: 1, widget: 0 }
+        ));
+
+        let second = drive(&canvas, &mut state, &click(mouse::Button::Left), centre);
+        assert_eq!(
+            second,
+            vec![
+                CanvasEvent::ButtonReleased { module: 1, widget: 0 },
+                CanvasEvent::ButtonPressed { module: 1, widget: 0 },
+            ]
+        );
+        assert!(
+            second
+                .iter()
+                .all(|event| !matches!(event, CanvasEvent::ResetControl { .. }))
+        );
+    }
+
+    /// Release is reported even after the pointer has left the button.
+    /// Dragging does not move the tile.
+    #[test]
+    fn a_button_reports_release_outside() {
+        let scene = Scene::new(vec![button_module()], Vec::new());
+        let centre = scene.module(1).unwrap().widget_bounds(0).unwrap().center();
+        let outside = Point::new(centre.x + 400.0, centre.y);
+        let selected = BTreeSet::from([1]);
+        let canvas = PatchCanvas::new(&scene, &selected, |e| e);
+        let mut state = State::default();
+
+        let down = drive(&canvas, &mut state, &click(mouse::Button::Left), centre);
+        assert_eq!(down, vec![CanvasEvent::ButtonPressed { module: 1, widget: 0 }]);
+
+        let moved = drive(
+            &canvas,
+            &mut state,
+            &Event::Mouse(mouse::Event::CursorMoved { position: outside }),
+            outside,
+        );
+        assert!(moved.iter().all(|event| !matches!(event, CanvasEvent::Move { .. })));
+
+        let up = drive(
+            &canvas,
+            &mut state,
+            &Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+            outside,
+        );
+        assert_eq!(up, vec![CanvasEvent::ButtonReleased { module: 1, widget: 0 }]);
+        assert!(matches!(state.interaction, Interaction::Idle));
+    }
+
+    /// Another mouse button ends the hold. Leaving the interaction as a pan
+    /// without a release would stick a momentary gate high.
+    #[test]
+    fn another_mouse_button_releases_a_hold() {
+        let scene = Scene::new(vec![button_module()], Vec::new());
+        let centre = scene.module(1).unwrap().widget_bounds(0).unwrap().center();
+        let selected = BTreeSet::from([1]);
+        let canvas = PatchCanvas::new(&scene, &selected, |e| e);
+        let mut state = State::default();
+        drive(&canvas, &mut state, &click(mouse::Button::Left), centre);
+
+        let right = drive(&canvas, &mut state, &click(mouse::Button::Right), centre);
+        assert_eq!(right, vec![CanvasEvent::ButtonReleased { module: 1, widget: 0 }]);
+        assert!(matches!(state.interaction, Interaction::Panning { .. }));
+    }
+
+    /// Losing the window while a key or the pointer is held reports a release.
+    /// The key-up event never arrives after the window is unfocused.
+    #[test]
+    fn losing_the_window_releases_a_hold() {
+        let scene = Scene::new(vec![button_module()], Vec::new());
+        let centre = scene.module(1).unwrap().widget_bounds(0).unwrap().center();
+        let selected = BTreeSet::from([1]);
+        let canvas = PatchCanvas::new(&scene, &selected, |e| e);
+        let mut state = State {
+            interaction: Interaction::Holding { module: 1, widget: 0 },
+            key_holds: [
+                Some(KeyHold {
+                    key: keyboard::key::Named::Space,
+                    module: 1,
+                    widget: 0,
+                }),
+                None,
+            ],
+            ..State::default()
+        };
+        let events = drive(&canvas, &mut state, &Event::Window(window::Event::Unfocused), centre);
+        assert_eq!(events, vec![CanvasEvent::ButtonReleased { module: 1, widget: 0 }]);
+        assert!(matches!(state.interaction, Interaction::Idle));
+        assert!(state.key_holds.iter().all(Option::is_none));
+    }
+
+    fn key_event(named: keyboard::key::Named, pressed: bool) -> Event {
+        let key = keyboard::Key::Named(named);
+        let code = match named {
+            keyboard::key::Named::Enter => keyboard::key::Code::Enter,
+            _ => keyboard::key::Code::Space,
+        };
+        let physical_key = keyboard::key::Physical::Code(code);
+        if pressed {
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                modified_key: key.clone(),
+                key,
+                physical_key,
+                location: keyboard::Location::Standard,
+                modifiers: keyboard::Modifiers::default(),
+                text: None,
+                repeat: false,
+            })
+        } else {
+            Event::Keyboard(keyboard::Event::KeyReleased {
+                modified_key: key.clone(),
+                key,
+                physical_key,
+                location: keyboard::Location::Standard,
+                modifiers: keyboard::Modifiers::default(),
+            })
+        }
+    }
+
+    /// Space on one button and Enter on another. Releasing one key releases
+    /// only the button that key was holding.
+    #[test]
+    fn each_key_releases_only_its_own_hold() {
+        let mut module = button_module();
+        module.panel.width = 12;
+        module.panel.widgets.push(widget(WidgetViewKind::Button, 6));
+        let scene = Scene::new(vec![module], Vec::new());
+        let selected = BTreeSet::from([1]);
+        let canvas = PatchCanvas::new(&scene, &selected, |e| e);
+        let mut state = State {
+            focus: Some((1, 0)),
+            ..State::default()
+        };
+        let at = Point::new(20.0, 20.0);
+
+        let space = drive(&canvas, &mut state, &key_event(keyboard::key::Named::Space, true), at);
+        assert_eq!(space, vec![CanvasEvent::ButtonPressed { module: 1, widget: 0 }]);
+
+        state.focus = Some((1, 1));
+        let enter = drive(&canvas, &mut state, &key_event(keyboard::key::Named::Enter, true), at);
+        assert_eq!(enter, vec![CanvasEvent::ButtonPressed { module: 1, widget: 1 }]);
+
+        let up_space = drive(&canvas, &mut state, &key_event(keyboard::key::Named::Space, false), at);
+        assert_eq!(up_space, vec![CanvasEvent::ButtonReleased { module: 1, widget: 0 }]);
+
+        let up_enter = drive(&canvas, &mut state, &key_event(keyboard::key::Named::Enter, false), at);
+        assert_eq!(up_enter, vec![CanvasEvent::ButtonReleased { module: 1, widget: 1 }]);
+    }
+
+    /// Both keys can hold one button. Releasing the first leaves it held.
+    #[test]
+    fn releasing_one_key_keeps_a_button_the_other_key_holds() {
+        let scene = Scene::new(vec![button_module()], Vec::new());
+        let selected = BTreeSet::from([1]);
+        let canvas = PatchCanvas::new(&scene, &selected, |e| e);
+        let mut state = State {
+            focus: Some((1, 0)),
+            ..State::default()
+        };
+        let at = Point::new(20.0, 20.0);
+        drive(&canvas, &mut state, &key_event(keyboard::key::Named::Space, true), at);
+        drive(&canvas, &mut state, &key_event(keyboard::key::Named::Enter, true), at);
+
+        let up_space = drive(&canvas, &mut state, &key_event(keyboard::key::Named::Space, false), at);
+        assert!(up_space.is_empty());
+
+        let up_enter = drive(&canvas, &mut state, &key_event(keyboard::key::Named::Enter, false), at);
+        assert_eq!(up_enter, vec![CanvasEvent::ButtonReleased { module: 1, widget: 0 }]);
+    }
+
+    /// A right-button release does not end a hold the left button started.
+    #[test]
+    fn releasing_another_mouse_button_keeps_the_left_hold() {
+        let scene = Scene::new(vec![button_module()], Vec::new());
+        let centre = scene.module(1).unwrap().widget_bounds(0).unwrap().center();
+        let selected = BTreeSet::from([1]);
+        let canvas = PatchCanvas::new(&scene, &selected, |e| e);
+        let mut state = State::default();
+        drive(&canvas, &mut state, &click(mouse::Button::Left), centre);
+
+        let right = drive(
+            &canvas,
+            &mut state,
+            &Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Right)),
+            centre,
+        );
+        assert!(right.is_empty());
+        assert!(matches!(
+            state.interaction,
+            Interaction::Holding { module: 1, widget: 0 }
+        ));
+    }
+
+    /// The gate stays down only when neither the pointer nor a key is holding.
+    #[test]
+    fn a_key_hold_survives_pointer_up_and_the_pointer_survives_a_key_up() {
+        let scene = Scene::new(vec![button_module()], Vec::new());
+        let centre = scene.module(1).unwrap().widget_bounds(0).unwrap().center();
+        let selected = BTreeSet::from([1]);
+        let canvas = PatchCanvas::new(&scene, &selected, |e| e);
+        let mut state = State {
+            focus: Some((1, 0)),
+            ..State::default()
+        };
+        drive(&canvas, &mut state, &click(mouse::Button::Left), centre);
+        drive(
+            &canvas,
+            &mut state,
+            &key_event(keyboard::key::Named::Space, true),
+            centre,
+        );
+
+        let pointer_up = drive(
+            &canvas,
+            &mut state,
+            &Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+            centre,
+        );
+        assert!(pointer_up.is_empty());
+        assert!(matches!(state.interaction, Interaction::Idle));
+
+        state.interaction = Interaction::Holding { module: 1, widget: 0 };
+        let key_up = drive(
+            &canvas,
+            &mut state,
+            &key_event(keyboard::key::Named::Space, false),
+            centre,
+        );
+        assert!(key_up.is_empty());
+        assert!(matches!(
+            state.interaction,
+            Interaction::Holding { module: 1, widget: 0 }
+        ));
+
+        let pointer_up = drive(
+            &canvas,
+            &mut state,
+            &Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+            centre,
+        );
+        assert_eq!(pointer_up, vec![CanvasEvent::ButtonReleased { module: 1, widget: 0 }]);
+    }
+
+    /// Space with no focused control asks the app to toggle Run. Enter does
+    /// not, a repeat does not, and a focused button still takes Space.
+    #[test]
+    fn space_with_no_focus_toggles_run() {
+        let scene = Scene::new(vec![button_module()], Vec::new());
+        let at = Point::new(10.0, 10.0);
+        let selected = BTreeSet::from([1]);
+        let canvas = PatchCanvas::new(&scene, &selected, |e| e);
+        let mut state = State::default();
+
+        let space = drive(&canvas, &mut state, &key_event(keyboard::key::Named::Space, true), at);
+        assert_eq!(space, vec![CanvasEvent::ToggleRun]);
+
+        let mut repeat = key_event(keyboard::key::Named::Space, true);
+        if let Event::Keyboard(keyboard::Event::KeyPressed { repeat, .. }) = &mut repeat {
+            *repeat = true;
+        }
+        let again = drive(&canvas, &mut state, &repeat, at);
+        assert!(again.is_empty());
+
+        let enter = drive(&canvas, &mut state, &key_event(keyboard::key::Named::Enter, true), at);
+        assert!(enter.is_empty());
+
+        state.focus = Some((1, 0));
+        let focused = drive(&canvas, &mut state, &key_event(keyboard::key::Named::Space, true), at);
+        assert_eq!(focused, vec![CanvasEvent::ButtonPressed { module: 1, widget: 0 }]);
+    }
+
+    fn learning<'a>(
+        scene: &'a Scene,
+        selected: &'a BTreeSet<u32>,
+        learn: &'a LearnView,
+    ) -> PatchCanvas<'a, CanvasEvent> {
+        PatchCanvas::new(scene, selected, |e| e).learn(Some(learn))
+    }
+
+    fn arrow_up() -> Event {
+        let key = keyboard::Key::Named(keyboard::key::Named::ArrowUp);
+        Event::Keyboard(keyboard::Event::KeyPressed {
+            modified_key: key.clone(),
+            key,
+            physical_key: keyboard::key::Physical::Code(keyboard::key::Code::ArrowUp),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::default(),
+            text: None,
+            repeat: false,
+        })
+    }
+
+    /// In MIDI learn mode a click arms a knob or a button and takes the
+    /// keyboard focus. It never turns the knob or presses the button.
+    #[test]
+    fn a_learn_click_arms_and_focuses_without_changing_a_value() {
+        let mut m = module(1, 0.0);
+        m.panel = panel();
+        let button = ModuleView {
+            id: 2,
+            position: Point::new(400.0, 0.0),
+            ..button_module()
+        };
+        let scene = Scene::new(vec![m, button], Vec::new());
+        let selected = BTreeSet::from([1]);
+        let learn = LearnView::default();
+        let canvas = learning(&scene, &selected, &learn);
+        let mut state = State {
+            focus: Some((1, 2)),
+            tab_focus: true,
+            ..State::default()
+        };
+        let knob = scene.module(1).unwrap().widget_bounds(0).unwrap().center();
+        let events = drive(&canvas, &mut state, &click(mouse::Button::Left), knob);
+        assert_eq!(events, vec![CanvasEvent::Learn { module: 1, widget: 0 }]);
+        assert!(matches!(state.interaction, Interaction::Idle));
+        assert_eq!(state.focus, Some((1, 0)));
+
+        let button = scene.module(2).unwrap().widget_bounds(0).unwrap().center();
+        let events = drive(&canvas, &mut state, &click(mouse::Button::Left), button);
+        assert!(
+            events.contains(&CanvasEvent::Learn { module: 2, widget: 0 }),
+            "{events:?}"
+        );
+        assert!(
+            events.iter().all(|e| !matches!(e, CanvasEvent::ButtonPressed { .. })),
+            "{events:?}"
+        );
+    }
+
+    /// In MIDI learn mode Space and Enter arm the focused control, arrows do
+    /// nothing, and Escape is left for the app, which ends the mode.
+    #[test]
+    fn learn_mode_keys_arm_and_never_change_a_value() {
+        let mut m = module(1, 0.0);
+        m.panel = panel();
+        let scene = Scene::new(vec![m], Vec::new());
+        let selected = BTreeSet::from([1]);
+        let learn = LearnView::default();
+        let canvas = learning(&scene, &selected, &learn);
+        let at = Point::new(10.0, 10.0);
+        let mut state = State {
+            focus: Some((1, 0)),
+            tab_focus: true,
+            ..State::default()
+        };
+        for key in [keyboard::key::Named::Space, keyboard::key::Named::Enter] {
+            let events = drive(&canvas, &mut state, &key_event(key, true), at);
+            assert_eq!(events, vec![CanvasEvent::Learn { module: 1, widget: 0 }]);
+        }
+        assert!(drive(&canvas, &mut state, &arrow_up(), at).is_empty());
+
+        let escape = {
+            let key = keyboard::Key::Named(keyboard::key::Named::Escape);
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                modified_key: key.clone(),
+                key: key.clone(),
+                physical_key: keyboard::key::Physical::Code(keyboard::key::Code::Escape),
+                location: keyboard::Location::Standard,
+                modifiers: keyboard::Modifiers::default(),
+                text: None,
+                repeat: false,
+            })
+        };
+        let mut messages = Vec::new();
+        let mut shell = Shell::new(&mut messages);
+        let bounds = Rectangle::new(Point::ORIGIN, Size::new(800.0, 600.0));
+        canvas.handle(&mut state, &escape, bounds, mouse::Cursor::Available(at), &mut shell);
+        assert_eq!(
+            shell.event_status(),
+            iced::event::Status::Ignored,
+            "the app must see Escape"
+        );
+        assert_eq!(state.focus, None);
+
+        // With nothing focused, Space is still the Run shortcut.
+        let events = drive(&canvas, &mut state, &key_event(keyboard::key::Named::Space, true), at);
+        assert_eq!(events, vec![CanvasEvent::ToggleRun]);
     }
 }

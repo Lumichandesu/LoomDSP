@@ -94,6 +94,8 @@ pub enum WidgetViewKind {
     Light,
     /// A level meter: an RMS bar and a peak line.
     Meter,
+    /// A large button. Its gesture depends on the mode stored with its value.
+    Button,
 }
 
 /// One widget on a panel, placed in grid units from the panel's corner.
@@ -120,6 +122,7 @@ impl WidgetView {
             WidgetViewKind::Knob { .. } => (3, 3),
             WidgetViewKind::Meter => (3, 6),
             WidgetViewKind::Toggle | WidgetViewKind::Light => (3, 2),
+            WidgetViewKind::Button => (6, 3),
             WidgetViewKind::Radio { options } => (3, options.len() as u8 + 1),
         }
     }

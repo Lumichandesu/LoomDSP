@@ -21,6 +21,7 @@ pub mod math;
 pub mod midi;
 pub mod osc;
 pub mod phase;
+pub mod ui;
 
 /// Every built-in module.
 pub static ALL: &[&ModuleDescriptor] = &[
@@ -39,6 +40,7 @@ pub static ALL: &[&ModuleDescriptor] = &[
     &midi::NOTE_IN,
     &display::METER,
     &logic::DIVIDE,
+    &ui::BUTTON,
 ];
 
 // Every built-in port and parameter has a label and a description, or this
@@ -70,19 +72,29 @@ mod tests {
     #[test]
     fn panels_follow_the_spec() {
         // docs/design/panels.md, Module panels on tiles: a knob for every
-        // parameter except these, and lights on MIDI Note and ADSR.
+        // parameter except these, and lights on MIDI Note and ADSR. Button's
+        // `on` is the button itself. Its `mode` stays in the inspector.
         let inspector_only = [
             ("loom.osc.noise", "seed"),
             ("loom.midi.note", "channel"),
             ("loom.midi.note", "bend-range"),
+            ("loom.ui.button", "mode"),
         ];
         for descriptor in super::ALL {
             let panel = &descriptor.panel;
             for param in descriptor.params {
-                let knob = panel
-                    .widgets
-                    .iter()
-                    .any(|w| w.kind == loom_core::WidgetKind::Knob && w.bind == param.name);
+                let widget = panel.widgets.iter().find(|w| w.bind == param.name);
+                if descriptor.id == "loom.ui.button" && param.name == "on" {
+                    assert!(
+                        matches!(
+                            widget.map(|w| w.kind),
+                            Some(loom_core::WidgetKind::Button { mode: "mode" })
+                        ),
+                        "button.on"
+                    );
+                    continue;
+                }
+                let knob = widget.is_some_and(|w| w.kind == loom_core::WidgetKind::Knob);
                 let expected = !inspector_only.contains(&(descriptor.id, param.name));
                 assert_eq!(knob, expected, "{}.{}", descriptor.id, param.name);
             }

@@ -74,6 +74,7 @@ fn panel_view(d: &ModuleDescriptor) -> PanelView {
                 WidgetKind::Radio { options } => WidgetViewKind::Radio {
                     options: options.iter().map(|o| o.to_string()).collect(),
                 },
+                WidgetKind::Button { .. } => WidgetViewKind::Button,
                 // Light, and any kind this app does not draw yet.
                 _ => WidgetViewKind::Light,
             };
@@ -183,6 +184,26 @@ pub fn meter_outputs(controller: &Controller, modules: &[u32]) -> Vec<((u32, usi
         .collect()
 }
 
+/// The parameter writes for one edit, including a button gate that a switch
+/// to momentary must clear.
+///
+/// The clear rides in the same list as the edit, so [`loom_core::Controller::set_params`]
+/// can send them together or not at all (clock.md, Button details).
+pub fn param_edits(node: &loom_core::Node, index: usize, value: f32) -> Vec<(usize, f32)> {
+    let Some(spec) = node.descriptor.params.get(index) else {
+        return vec![(index, value)];
+    };
+    let next = spec.clamp(value);
+    let mut changes = vec![(index, next)];
+    let previous = node.params.get(index).copied().unwrap_or(next);
+    for gate in node.descriptor.button_gates_to_clear(spec.name, previous, next) {
+        if gate != index && changes.iter().all(|(existing, _)| *existing != gate) {
+            changes.push((gate, 0.0));
+        }
+    }
+    changes
+}
+
 /// The parameter a control is bound to, if the module and widget exist.
 pub fn control_param(controller: &Controller, module: u32, widget: usize) -> Option<(usize, WidgetKind, ParamSpec)> {
     let d = controller.graph().node(ModuleId(module))?.descriptor;
@@ -257,6 +278,41 @@ mod tests {
         assert!((value - 632.46).abs() < 0.1, "{value}");
         let back = control_position(WidgetKind::Knob, &CUTOFF, value);
         assert!((back - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn switching_a_button_to_momentary_clears_its_gate() {
+        use loom_core::{EngineConfig, Registry, create_engine};
+        use std::sync::Arc;
+
+        let mut registry = Registry::new();
+        loom_modules::register_all(&mut registry).unwrap();
+        let parts = create_engine(Arc::new(registry), EngineConfig::default());
+        let mut controller = parts.controller;
+        let id = controller.add_module("loom.ui.button").unwrap();
+        let mode = controller
+            .graph()
+            .node(id)
+            .unwrap()
+            .descriptor
+            .param_index("mode")
+            .unwrap();
+        let on = controller
+            .graph()
+            .node(id)
+            .unwrap()
+            .descriptor
+            .param_index("on")
+            .unwrap();
+        controller.set_param(id, on, 1.0).unwrap();
+
+        let node = controller.graph().node(id).unwrap();
+        assert_eq!(param_edits(node, mode, 1.0), vec![(mode, 1.0), (on, 0.0)]);
+
+        controller.set_param(id, mode, 1.0).unwrap();
+        let node = controller.graph().node(id).unwrap();
+        assert_eq!(param_edits(node, mode, 1.0), vec![(mode, 1.0)]);
+        assert_eq!(param_edits(node, on, 1.0), vec![(on, 1.0)]);
     }
 
     #[test]

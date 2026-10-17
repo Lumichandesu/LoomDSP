@@ -9,7 +9,7 @@ How a performer links a hardware knob or fader to any parameter in a few seconds
 - **Background:** [parameter mapping](modulation.md#parameter-mapping) (value to position and back).
 - **Prior art:** most DAWs and software modular tools have a "learn" gesture: arm a control, move a hardware control, and the two are linked. We use the idea, in our own words.
 - **Issues:** [#24](https://github.com/brylie/LoomDSP/issues/24).
-- **Code:** `crates/loom-core/src/midi_map.rs` (mappings and feedback), `Engine::apply_midi_maps`, the `Controller` MIDI methods, the `midi` list in `loom-patch`, `crates/loom-app/src/learn.rs` (learn mode), and `LearnView` in `loom-canvas`. Tests: `crates/loom-modules/tests/midi_learn.rs`.
+- **Code:** `crates/loom-core/src/midi_map.rs` (mappings and feedback), `Engine::apply_midi_maps`, the `Controller` MIDI methods, the `midi` list in `loom-patch`, `crates/loom-app/src/learn.rs` (learn mode), and `LearnView` in `loom-canvas`. Tests: `crates/loom-modules/tests/midi_learn.rs`, and the learn mode tests in `loom-canvas`'s `widget.rs`.
 
 <!-- Spec first: agree on this before building. Keep it true as the code is
      built. See README.md in this folder. -->
@@ -38,7 +38,7 @@ The user touches the control on screen, then moves the hardware control. Learn m
 | In learn mode, click a knob, toggle, or radio button on a tile, or a parameter row in the inspector | That parameter is armed. The control is highlighted and the status bar says **Move a MIDI control to map it to <module> <parameter>**. The value does not change. Any parameter armed before is disarmed. |
 | Move a hardware knob or fader while a parameter is armed | A mapping is made from that control change (channel and controller number) to the armed parameter. The status bar says which control was mapped. Nothing is armed now, and learn mode stays on, so the next control can be mapped at once. |
 | In learn mode, click an armed control again | It is disarmed. |
-| In learn mode, press Space or Enter on a control focused with Tab | The same as a click: it arms or disarms the control. The arrow keys do nothing. |
+| In learn mode, press Space or Enter on a control focused with Tab | The same as a click: it arms or disarms the control. The arrow keys do nothing. With no control focused, Space still starts and stops the transport, because that is not a parameter. |
 | Press **MIDI learn** again, or press Escape | Learn mode ends. An armed parameter is disarmed with no change. |
 
 - **Touch first, then the hardware.** *Why:* the user points at what they want to control and then shows which hardware control does it. This is direct manipulation, and it is the order the user thinks in. Learning from a list in the inspector alone is harder to follow.

@@ -315,6 +315,7 @@ mod tests {
                     param("level", 0.0, 1.0, 0.5, ""),
                     param("on", 0.0, 1.0, 0.0, "").integer(),
                     param("slope", 0.0, 3.0, 0.0, "").integer(),
+                    param("mode", 0.0, 1.0, 0.0, "").integer(),
                 ],
                 role: ModuleRole::Dsp(|_| unreachable!("never created")),
                 panel: crate::Panel::new($width, $height, &[$($widget),*]),
@@ -359,6 +360,26 @@ mod tests {
             (
                 with_panel!(3, 6, [Widget::meter(0, 0, "wet")]),
                 "`wet` (Meter): no such output",
+            ),
+            (
+                with_panel!(6, 3, [Widget::button(0, 0, "level", "mode")]),
+                "a button needs",
+            ),
+            (
+                with_panel!(6, 3, [Widget::button(0, 0, "on", "missing")]),
+                "no such mode parameter",
+            ),
+            (
+                with_panel!(6, 3, [Widget::button(0, 0, "on", "level")]),
+                "mode must be a whole-number parameter from 0 to 1",
+            ),
+            (
+                with_panel!(6, 3, [Widget::button(0, 0, "on", "slope")]),
+                "mode must be a whole-number parameter from 0 to 1",
+            ),
+            (
+                with_panel!(6, 3, [Widget::button(0, 0, "on", "on")]),
+                "mode must be a different parameter",
             ),
             (with_panel!(3, 2, [Widget::knob(0, 0, "level")]), "outside the panel"),
             (

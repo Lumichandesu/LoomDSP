@@ -34,8 +34,9 @@ pub mod transport;
 pub use compile::{CompileReport, FeedbackLoop};
 pub use controller::{Controller, EngineParts, MidiSender, create_engine};
 pub use descriptor::{
-    MAX_DISPLAYS, MissingText, ModuleConfig, ModuleDescriptor, ModuleRole, Panel, ParamMapping, ParamOptions,
-    ParamSpec, Polarity, PortDefault, PortSpec, SpecKind, Undocumented, Widget, WidgetKind, assert_documented,
+    ButtonMode, MAX_DISPLAYS, MissingText, ModuleConfig, ModuleDescriptor, ModuleRole, Panel, ParamMapping,
+    ParamOptions, ParamSpec, Polarity, PortDefault, PortSpec, SpecKind, Undocumented, Widget, WidgetKind,
+    assert_documented,
 };
 pub use display::{DisplayReader, DisplaySource};
 pub use engine::{Engine, EngineConfig, EngineStats};

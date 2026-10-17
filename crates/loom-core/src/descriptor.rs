@@ -428,12 +428,29 @@ impl Widget {
         }
     }
 
+    /// A large button for a whole-number parameter from 0 to 1.
+    ///
+    /// `mode` names a different whole-number parameter, from 0 to 1, that
+    /// chooses the gesture: 0 flips `param` on press, and 1 holds it high
+    /// while the button is held. The canvas does not read it. The editor
+    /// does, through [`ButtonMode`]. It does not have to be a widget.
+    /// Spec: `docs/design/clock.md`, Button details.
+    pub const fn button(x: u8, y: u8, param: &'static str, mode: &'static str) -> Self {
+        Self {
+            kind: WidgetKind::Button { mode },
+            x,
+            y,
+            bind: param,
+        }
+    }
+
     /// Width and height in grid units.
     pub const fn size(&self) -> (u8, u8) {
         match self.kind {
             WidgetKind::Knob => (3, 3),
             WidgetKind::Meter => (3, 6),
             WidgetKind::Toggle | WidgetKind::Light => (3, 2),
+            WidgetKind::Button { .. } => (6, 3),
             WidgetKind::Radio { options } => (3, options.len() as u8 + 1),
         }
     }
@@ -462,6 +479,82 @@ pub enum WidgetKind {
     /// The level of one of the module's outputs, from a port probe: an RMS
     /// bar and a peak line, -60 dB to 0 dB.
     Meter,
+    /// A large button for a whole-number parameter from 0 to 1.
+    ///
+    /// `mode` names the parameter that chooses the gesture. It is not the
+    /// value the button shows.
+    Button {
+        /// Whole-number parameter from 0 to 1: 0 flips on press, 1 holds
+        /// while pressed. Not the parameter the button shows.
+        mode: &'static str,
+    },
+}
+
+/// How a [`WidgetKind::Button`] answers a gesture.
+///
+/// The canvas reports a press, a release, or an arrow. The editor uses this
+/// to choose the parameter value, so the canvas stays a reporter of input
+/// (ADR-0010). Spec: `docs/design/clock.md`, Button details.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ButtonMode {
+    /// A press flips the gate. A release leaves it.
+    Toggle,
+    /// The gate is high only while the button is held.
+    Momentary,
+}
+
+impl ButtonMode {
+    /// `1` is momentary. Any lower value is toggle.
+    ///
+    /// A mode parameter is a whole number from 0 to 1, so these are the only
+    /// values the editor stores.
+    #[must_use]
+    pub fn from_value(value: f32) -> Self {
+        if value >= 1.0 { Self::Momentary } else { Self::Toggle }
+    }
+
+    /// The value to write when the button is pressed.
+    ///
+    /// Toggle flips `current`. Momentary goes high.
+    #[must_use]
+    pub fn press(self, current: f32) -> Option<f32> {
+        Some(match self {
+            Self::Toggle => {
+                if current >= 0.5 {
+                    0.0
+                } else {
+                    1.0
+                }
+            }
+            Self::Momentary => 1.0,
+        })
+    }
+
+    /// The value to write when the hold ends.
+    ///
+    /// Toggle keeps its gate, so this is `None`. Momentary goes low.
+    #[must_use]
+    pub fn release(self) -> Option<f32> {
+        match self {
+            Self::Toggle => None,
+            Self::Momentary => Some(0.0),
+        }
+    }
+
+    /// The value to write for an arrow key, if the key changes anything.
+    ///
+    /// `high` is up or right. Toggle sets 0 or 1. Momentary ignores arrows.
+    /// A toggle that is already there returns `None`.
+    #[must_use]
+    pub fn arrow(self, current: f32, high: bool) -> Option<f32> {
+        match self {
+            Self::Momentary => None,
+            Self::Toggle => {
+                let next = if high { 1.0 } else { 0.0 };
+                ((current >= 0.5) != high).then_some(next)
+            }
+        }
+    }
 }
 
 impl ModuleDescriptor {
@@ -485,6 +578,30 @@ impl ModuleDescriptor {
         self.displays.iter().position(|&d| d == name)
     }
 
+    /// Parameters to set to 0 when `name` changes from `previous` to `next`.
+    ///
+    /// A button whose mode moves to momentary (1) clears the parameter the
+    /// button shows, so a latched gate does not stay high with nobody holding
+    /// it. Setting momentary again, while it is already momentary, clears
+    /// nothing. The rule follows the widget, so any module with a button
+    /// gets it. Spec: `docs/design/clock.md`, Button details.
+    pub fn button_gates_to_clear<'a>(
+        &'a self,
+        name: &'a str,
+        previous: f32,
+        next: f32,
+    ) -> impl Iterator<Item = usize> + 'a {
+        let switching = previous < 1.0 && next >= 1.0;
+        self.panel.widgets.iter().filter_map(move |widget| {
+            let WidgetKind::Button { mode } = widget.kind else {
+                return None;
+            };
+            (switching && mode == name)
+                .then(|| self.param_index(widget.bind))
+                .flatten()
+        })
+    }
+
     /// Checks the display values and the panel: every widget binds to
     /// something this module has, fits its binding, lies inside the panel,
     /// and overlaps no other widget. The registry runs this check.
@@ -499,6 +616,20 @@ impl ModuleDescriptor {
                 let Some(index) = self.param_index(widget.bind) else {
                     return Err(name("no such parameter"));
                 };
+                // Copied before `param` is borrowed: a button names a second
+                // parameter, and the two borrows cannot overlap.
+                let mode_range = if let WidgetKind::Button { mode } = widget.kind {
+                    if mode == widget.bind {
+                        return Err(name("mode must be a different parameter"));
+                    }
+                    let Some(mode_index) = self.param_index(mode) else {
+                        return Err(name("no such mode parameter"));
+                    };
+                    let mode_param = &self.params[mode_index];
+                    Some((mode_param.options.integer, mode_param.min, mode_param.max))
+                } else {
+                    None
+                };
                 let param = &self.params[index];
                 let values = param.max - param.min + 1.0;
                 let integer = param.options.integer;
@@ -510,6 +641,14 @@ impl ModuleDescriptor {
                         return Err(name(
                             "radio buttons need a whole-number parameter with one value per option",
                         ));
+                    }
+                    WidgetKind::Button { .. } if !(integer && param.min == 0.0 && param.max == 1.0) => {
+                        return Err(name("a button needs a whole-number parameter from 0 to 1"));
+                    }
+                    WidgetKind::Button { .. }
+                        if !mode_range.is_some_and(|(whole, min, max)| whole && min == 0.0 && max == 1.0) =>
+                    {
+                        return Err(name("mode must be a whole-number parameter from 0 to 1"));
                     }
                     _ => {}
                 }
@@ -911,5 +1050,67 @@ mod tests {
     #[should_panic(expected = "test.undocumented: input `in` has no description. Every port and parameter needs")]
     fn assert_documented_names_the_first_missing_text() {
         assert_documented(&[&DOCUMENTED, &UNDOCUMENTED]);
+    }
+
+    #[test]
+    fn button_mode_turns_a_gesture_into_a_value() {
+        let toggle = ButtonMode::Toggle;
+        assert_eq!(toggle.press(0.0), Some(1.0));
+        assert_eq!(toggle.press(1.0), Some(0.0));
+        assert_eq!(toggle.release(), None);
+        assert_eq!(toggle.arrow(0.0, true), Some(1.0));
+        assert_eq!(toggle.arrow(1.0, true), None);
+        assert_eq!(toggle.arrow(1.0, false), Some(0.0));
+        assert_eq!(toggle.arrow(0.0, false), None);
+
+        let momentary = ButtonMode::Momentary;
+        assert_eq!(momentary.press(0.0), Some(1.0));
+        assert_eq!(momentary.release(), Some(0.0));
+        assert_eq!(momentary.arrow(0.0, true), None);
+        assert_eq!(momentary.arrow(1.0, false), None);
+        assert_eq!(ButtonMode::from_value(0.0), ButtonMode::Toggle);
+        assert_eq!(ButtonMode::from_value(1.0), ButtonMode::Momentary);
+    }
+
+    #[test]
+    fn switching_a_button_to_momentary_clears_its_gate() {
+        const fn parameter(name: &'static str) -> ParamSpec {
+            ParamSpec {
+                name,
+                label: name,
+                description: "A test parameter.",
+                min: 0.0,
+                max: 1.0,
+                default: 0.0,
+                unit: "",
+                options: ParamOptions::DEFAULT,
+            }
+            .integer()
+        }
+        static BUTTONS: ModuleDescriptor = ModuleDescriptor {
+            id: "test.buttons",
+            version: 1,
+            name: "Buttons",
+            category: "Test",
+            description: "Two buttons that share a mode.",
+            inputs: &[],
+            outputs: &[],
+            params: &[parameter("mode"), parameter("on"), parameter("reset")],
+            role: ModuleRole::Dsp(|_| unreachable!("never created")),
+            panel: Panel::new(
+                12,
+                3,
+                &[
+                    Widget::button(0, 0, "on", "mode"),
+                    Widget::button(6, 0, "reset", "mode"),
+                ],
+            ),
+            displays: &[],
+        };
+        let cleared: Vec<usize> = BUTTONS.button_gates_to_clear("mode", 0.0, 1.0).collect();
+        assert_eq!(cleared, vec![1, 2]);
+        assert!(BUTTONS.button_gates_to_clear("mode", 1.0, 1.0).next().is_none());
+        assert!(BUTTONS.button_gates_to_clear("mode", 1.0, 0.0).next().is_none());
+        assert!(BUTTONS.button_gates_to_clear("on", 0.0, 1.0).next().is_none());
     }
 }

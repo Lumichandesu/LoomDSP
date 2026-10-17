@@ -266,7 +266,7 @@ These depend on how notes travel on cables (OQ-16).
 | MT-VIEW-03 | Spectrum | Shows the frequency content of a signal. | | P2 | FR-LIB-17 | Planned |
 | MT-VIEW-04 | Note monitor | Shows incoming notes and controller values, for checking a setup. | | P2 | New | Planned |
 | MT-VIEW-05 | Tuner | Shows the pitch of a signal against the nearest note. | | P4 | New | Planned |
-| MT-UI-01 | Button | A large button that outputs a toggle or momentary gate. | | P1 | FR-LIB-27 | Specified (`loom.ui.button`) |
+| MT-UI-01 | Button | A large button that outputs a toggle or momentary gate. | | P1 | FR-LIB-27 | Built (`loom.ui.button`) |
 | MT-UI-02 | Macro | A knob or slider whose value is a signal. One macro can drive many parameters through modulation assignments. | Smoothing | P2 | FR-LIB-12 | Planned |
 | MT-UI-03 | XY and vector pad | A two-axis control, or one point that blends between several sources. | Smoothing | P2 | FR-LIB-12 | Planned |
 | MT-UI-04 | Keyboard | Plays notes from the canvas or a front panel. | | P2 | New | Planned |

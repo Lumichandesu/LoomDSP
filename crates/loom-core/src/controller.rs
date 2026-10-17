@@ -528,6 +528,71 @@ impl Controller {
         Ok(InputRef { module, port })
     }
 
+    /// Sets several parameters of one module, or none of them.
+    ///
+    /// Takes effect at the next buffer. Each value is clamped. If the command
+    /// queue cannot take every change, the graph is left as it was. A mode
+    /// change that also clears a button's gate uses this, so a full queue
+    /// cannot leave the mode on momentary and the gate high.
+    pub fn set_params(&mut self, module: ModuleId, changes: &[(usize, f32)]) -> Result<(), LoomError> {
+        let node = self.graph.nodes.get(&module).ok_or(LoomError::UnknownModule(module))?;
+        let mut clamped = Vec::with_capacity(changes.len());
+        for &(index, value) in changes {
+            let spec = node
+                .descriptor
+                .params
+                .get(index)
+                .ok_or_else(|| LoomError::NoSuchParam {
+                    module,
+                    param: index.to_string(),
+                })?;
+            clamped.push((index, spec.clamp(value)));
+        }
+        // Mapped parameters carry an edit token, as in `set_param`.
+        let mappings: Vec<_> = clamped
+            .iter()
+            .map(|&(index, _)| {
+                self.graph
+                    .midi_mapping_of(module, index)
+                    .map(|(id, mapping)| (id, mapping.control))
+            })
+            .collect();
+        if let Some(slot) = node.slot {
+            // Check first, then send, then write the graph. A full queue
+            // then changes nothing the engine and the graph could disagree on.
+            if self.commands.slots() < clamped.len() {
+                return Err(LoomError::QueueFull);
+            }
+            for (&(index, value), mapping) in clamped.iter().zip(&mappings) {
+                let edit = mapping.map(|(id, control)| {
+                    let token = self.next_edit;
+                    self.next_edit = self.next_edit.wrapping_add(1).max(1);
+                    self.midi_edits.insert(id, token);
+                    (control, token)
+                });
+                let pushed = self
+                    .commands
+                    .push(Command::SetParam {
+                        slot,
+                        index,
+                        value,
+                        edit,
+                    })
+                    .is_ok();
+                debug_assert!(pushed, "capacity was checked above");
+            }
+        }
+        let node = self
+            .graph
+            .nodes
+            .get_mut(&module)
+            .expect("module was present before the commands were sent");
+        for (index, value) in clamped {
+            node.params[index] = value;
+        }
+        Ok(())
+    }
+
     /// Sets a parameter by index. Takes effect at the next buffer.
     /// The value is clamped to the parameter's range.
     pub fn set_param(&mut self, module: ModuleId, index: usize, value: f32) -> Result<f32, LoomError> {
@@ -808,4 +873,74 @@ impl Controller {
 /// Clamps a modulation depth to -1..1. NaN becomes 0, which adds nothing.
 fn clamp_depth(depth: f32) -> f32 {
     if depth.is_nan() { 0.0 } else { depth.clamp(-1.0, 1.0) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::module::{Module, PortIo, ProcessContext};
+    use crate::{Panel, ParamOptions, ParamSpec, Widget};
+
+    struct Silent;
+
+    impl Module for Silent {
+        fn process(&mut self, _ctx: &ProcessContext<'_>, _io: &mut PortIo<'_>) {}
+    }
+
+    const fn parameter(name: &'static str) -> ParamSpec {
+        ParamSpec {
+            name,
+            label: name,
+            description: "A test parameter.",
+            min: 0.0,
+            max: 1.0,
+            default: 0.0,
+            unit: "",
+            options: ParamOptions::DEFAULT,
+        }
+        .integer()
+    }
+
+    static GATE: ModuleDescriptor = ModuleDescriptor {
+        id: "test.gate",
+        version: 1,
+        name: "Gate",
+        category: "Test",
+        description: "A button for the queue test.",
+        inputs: &[],
+        outputs: &[],
+        params: &[parameter("mode"), parameter("on")],
+        role: ModuleRole::Dsp(|_| Box::new(Silent)),
+        panel: Panel::new(6, 3, &[Widget::button(0, 0, "on", "mode")]),
+        displays: &[],
+    };
+
+    fn controller(capacity: usize) -> Controller {
+        let mut registry = Registry::new();
+        registry.register(&GATE).expect("test module is valid");
+        let config = EngineConfig {
+            command_capacity: capacity,
+            ..EngineConfig::default()
+        };
+        create_engine(Arc::new(registry), config).controller
+    }
+
+    #[test]
+    fn set_params_writes_both_or_neither() {
+        let mut room = controller(8);
+        let id = room.add_module(GATE.id).unwrap();
+        room.commit().unwrap();
+        room.set_param_named(id, "on", 1.0).unwrap();
+        room.set_params(id, &[(0, 1.0), (1, 0.0)]).unwrap();
+        assert_eq!(room.graph().node(id).unwrap().params, vec![1.0, 0.0]);
+
+        // Inserting the module and swapping in its schedule fill a queue of
+        // two. Two parameter commands do not fit, so neither value changes.
+        let mut full = controller(2);
+        let id = full.add_module(GATE.id).unwrap();
+        full.commit().unwrap();
+        let error = full.set_params(id, &[(0, 1.0), (1, 0.0)]).unwrap_err();
+        assert!(matches!(error, LoomError::QueueFull), "{error}");
+        assert_eq!(full.graph().node(id).unwrap().params, vec![0.0, 0.0]);
+    }
 }
