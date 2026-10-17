@@ -100,7 +100,7 @@ midi: [
 - [x] Given a mapping, when its control change arrives, then the parameter's base value is `denormalize(value / 127)`: the minimum at 0, the maximum at 127, and the middle of a logarithmic range at 64 (within one step).
 - [x] A control change on another channel or controller number does not move the parameter.
 - [x] Learning a mapped parameter replaces its mapping. Learning a hardware control that is already mapped moves the mapping to the new parameter, and the status bar names the old one.
-- [ ] Clicking an armed control disarms it. Escape or a second press of **MIDI learn** ends learn mode with no change.
+- [x] Clicking an armed control disarms it. Escape or a second press of **MIDI learn** ends learn mode with no change.
 - [ ] In learn mode, every mapped control in view shows its `CC` label.
 - [ ] The tile knob and the inspector show the value set by the hardware within one UI frame.
 - [x] A mapped control change still reaches a MIDI input module.
