@@ -137,20 +137,18 @@ impl Module for Adsr {
         let release = io.modulated(3);
         let ([gate], [out]) = io.split::<1, 1>();
         for (i, (out, &g)) in out.iter_mut().zip(gate).enumerate() {
-            if attack.is_some() || decay.is_some() || sustain.is_some() || release.is_some() {
-                if let Some(samples) = attack {
-                    self.attack_step = 1.0 / (samples[i] * self.sample_rate).max(1.0);
-                }
-                if let Some(samples) = decay {
-                    self.decay_coefficient = exp_coefficient(samples[i], self.sample_rate);
-                }
-                if let Some(samples) = sustain {
-                    self.sustain = samples[i];
-                }
-                if let Some(samples) = release {
-                    self.release_coefficient = exp_coefficient(samples[i], self.sample_rate);
-                }
-            }
+            // Modulated values live only for this frame. The fields keep the
+            // knob's base, so removing an assignment returns to it.
+            let attack_step = attack.map_or(self.attack_step, |samples| {
+                1.0 / (samples[i] * self.sample_rate).max(1.0)
+            });
+            let decay_coefficient = decay.map_or(self.decay_coefficient, |samples| {
+                exp_coefficient(samples[i], self.sample_rate)
+            });
+            let sustain = sustain.map_or(self.sustain, |samples| samples[i]);
+            let release_coefficient = release.map_or(self.release_coefficient, |samples| {
+                exp_coefficient(samples[i], self.sample_rate)
+            });
             let high = gate_is_high(g);
             if high && !self.gate_was_high {
                 // Start from the current level: no click on retrigger.
@@ -163,17 +161,17 @@ impl Module for Adsr {
             match self.stage {
                 Stage::Idle => self.level = 0.0,
                 Stage::Attack => {
-                    self.level += self.attack_step;
+                    self.level += attack_step;
                     if self.level >= 1.0 {
                         self.level = 1.0;
                         self.stage = Stage::Decay;
                     }
                 }
                 Stage::Decay => {
-                    self.level = self.sustain + (self.level - self.sustain) * self.decay_coefficient;
+                    self.level = sustain + (self.level - sustain) * decay_coefficient;
                 }
                 Stage::Release => {
-                    self.level *= self.release_coefficient;
+                    self.level *= release_coefficient;
                     if self.level < 1e-5 {
                         self.level = 0.0;
                         self.stage = Stage::Idle;

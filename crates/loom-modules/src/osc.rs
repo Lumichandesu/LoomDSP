@@ -154,7 +154,11 @@ pub static NOISE: ModuleDescriptor = ModuleDescriptor {
     .integer()],
     role: ModuleRole::Dsp(|config: &ModuleConfig| {
         let _ = config;
-        Box::new(Noise { state: 1, seed: 1 })
+        Box::new(Noise {
+            state: 1,
+            seed: 1,
+            active: 1,
+        })
     }),
     panel: Panel::EMPTY,
     displays: &[],
@@ -162,7 +166,11 @@ pub static NOISE: ModuleDescriptor = ModuleDescriptor {
 
 struct Noise {
     state: u32,
+    /// The knob's base seed. Only `set_param` writes it.
     seed: u32,
+    /// The seed `state` was last started from: the modulated seed while an
+    /// assignment is active, otherwise the base.
+    active: u32,
 }
 
 impl Module for Noise {
@@ -170,12 +178,12 @@ impl Module for Noise {
         let seed = io.modulated(0);
         let ([], [out]) = io.split::<0, 1>();
         for (i, out) in out.iter_mut().enumerate() {
-            if let Some(samples) = seed {
-                let next = samples[i].round().max(1.0) as u32;
-                if next != self.seed {
-                    self.seed = next;
-                    self.state = next;
-                }
+            // Restart the pattern when the seed in use changes, including
+            // back to the base when an assignment is removed.
+            let next = seed.map_or(self.seed, |samples| samples[i].round().max(1.0) as u32);
+            if next != self.active {
+                self.active = next;
+                self.state = next;
             }
             // xorshift32: fast, deterministic, good enough for audio noise.
             let mut x = self.state;
@@ -190,12 +198,13 @@ impl Module for Noise {
     fn set_param(&mut self, index: usize, value: f32) {
         if index == 0 {
             self.seed = value.round().max(1.0) as u32;
+            self.active = self.seed;
             self.state = self.seed;
         }
     }
 
     fn reset(&mut self) {
-        self.state = self.seed;
+        self.state = self.active;
     }
 }
 

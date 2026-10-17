@@ -1,9 +1,9 @@
 //! Engine acceptance tests for parameter modulation.
 
 use loom_core::{
-    Controller, EngineConfig, EngineParts, Module, ModuleConfig, ModuleDescriptor, ModuleId, ModuleRole, Panel,
-    ParamOptions, ParamSpec, Polarity, PortDefault, PortIo, PortSpec, ProbeKind, ProcessContext, SignalType,
-    create_engine,
+    AssignmentId, Controller, EngineConfig, EngineParts, MidiEvent, Module, ModuleConfig, ModuleDescriptor, ModuleId,
+    ModuleRole, Panel, ParamOptions, ParamSpec, Polarity, PortDefault, PortIo, PortSpec, ProbeKind, ProcessContext,
+    SignalType, create_engine,
 };
 use loom_modules::register_all;
 use std::sync::Arc;
@@ -356,4 +356,196 @@ fn deleting_a_module_removes_its_assignments() {
         .unwrap();
     parts.controller.remove_module(sink).unwrap();
     assert!(parts.controller.graph().assignments().next().is_none());
+}
+
+/// How a test takes the modulation away again.
+#[derive(Clone, Copy, Debug)]
+enum Removal {
+    Assignment,
+    SourceModule,
+}
+
+const REMOVALS: [Removal; 2] = [Removal::Assignment, Removal::SourceModule];
+
+/// A sink module with base values, plus a constant source at 1.0 for its
+/// assignments. Sending no assignment builds the unmodulated reference.
+struct Rig {
+    parts: EngineParts,
+    sink: ModuleId,
+    source: ModuleId,
+    assignments: Vec<AssignmentId>,
+}
+
+impl Rig {
+    fn new(kind: &str, base: &[(&str, f32)]) -> Self {
+        let mut parts = engine();
+        let sink = parts.controller.add_module(kind).unwrap();
+        for &(param, value) in base {
+            parts.controller.set_param_named(sink, param, value).unwrap();
+        }
+        let source = module(&mut parts.controller, "test.linear", "level", 1.0);
+        Self {
+            parts,
+            sink,
+            source,
+            assignments: Vec::new(),
+        }
+    }
+
+    fn assign(&mut self, param: &str, depth: f32) {
+        let id = self
+            .parts
+            .controller
+            .add_assignment_named(self.source, "out", self.sink, param, depth)
+            .unwrap();
+        self.assignments.push(id);
+    }
+
+    /// Plays `left` and `right` of the sink to the audio output.
+    fn listen(&mut self, left: &str, right: &str) {
+        let audio = self.parts.controller.add_module("loom.io.audio-out").unwrap();
+        let controller = &mut self.parts.controller;
+        controller.connect_named(self.sink, left, audio, "left").unwrap();
+        controller.connect_named(self.sink, right, audio, "right").unwrap();
+        controller.commit().unwrap();
+    }
+
+    fn remove(&mut self, how: Removal) {
+        match how {
+            Removal::Assignment => {
+                for id in self.assignments.drain(..) {
+                    self.parts.controller.remove_assignment(id).unwrap();
+                }
+            }
+            Removal::SourceModule => {
+                self.parts.controller.remove_module(self.source).unwrap();
+                self.assignments.clear();
+            }
+        }
+        self.parts.controller.commit().unwrap();
+    }
+
+    fn render(&mut self, frames: usize) -> (Vec<f32>, Vec<f32>) {
+        let mut left = vec![0.0; frames];
+        let mut right = vec![0.0; frames];
+        for (l, r) in left.chunks_mut(64).zip(right.chunks_mut(64)) {
+            self.parts.engine.process(l, r);
+        }
+        (left, right)
+    }
+}
+
+/// Regression for a module that wrote modulated samples into the fields
+/// `set_param` owns: after the assignment went away it kept the last
+/// modulated value, because nothing calls `set_param` again.
+#[test]
+fn adsr_returns_to_base_sustain() {
+    for how in REMOVALS {
+        let mut rig = Rig::new(
+            "loom.env.adsr",
+            &[("attack", 0.0005), ("decay", 0.0005), ("sustain", 0.5)],
+        );
+        let gate = module(&mut rig.parts.controller, "test.linear", "level", 1.0);
+        rig.parts
+            .controller
+            .connect_named(gate, "out", rig.sink, "gate")
+            .unwrap();
+        rig.assign("sustain", 0.5);
+        rig.listen("out", "out");
+
+        let (modulated, _) = rig.render(4_800);
+        let last = modulated[modulated.len() - 1];
+        assert!((last - 1.0).abs() < 1e-3, "{how:?}: modulated sustain, got {last}");
+
+        rig.remove(how);
+        let (base, _) = rig.render(4_800);
+        let last = base[base.len() - 1];
+        assert!((last - 0.5).abs() < 1e-3, "{how:?}: base sustain, got {last}");
+    }
+}
+
+#[test]
+fn divide_returns_to_base_n_and_offset() {
+    fn run(how: Option<Removal>) -> (Vec<f32>, Vec<f32>) {
+        let mut rig = Rig::new("loom.logic.divide", &[("n", 2.0), ("offset", 0.0)]);
+        let controller = &mut rig.parts.controller;
+        let phase = controller.add_module("loom.phase.generator").unwrap();
+        let triggers = controller.add_module("loom.phase.trigger").unwrap();
+        controller.connect_named(phase, "phase", triggers, "phase").unwrap();
+        controller
+            .connect_named(triggers, "trigger", rig.sink, "trigger")
+            .unwrap();
+        if how.is_some() {
+            // n goes to 4 and offset to 1.
+            rig.assign("n", 2.0 / 63.0);
+            rig.assign("offset", 1.0 / 63.0);
+        }
+        rig.listen("trigger", "trigger");
+        let before = rig.render(9_600).0;
+        if let Some(how) = how {
+            rig.remove(how);
+        }
+        (before, rig.render(9_600).0)
+    }
+
+    let (reference_before, reference) = run(None);
+    assert!(reference.contains(&1.0), "the reference fires");
+    for how in REMOVALS {
+        let (before, after) = run(Some(how));
+        assert_ne!(before, reference_before, "{how:?}: modulation changes the output");
+        assert_eq!(after, reference, "{how:?}");
+    }
+}
+
+#[test]
+fn note_in_returns_to_base_channel_and_bend_range() {
+    fn run(how: Option<Removal>) -> (Vec<f32>, Vec<f32>) {
+        let mut rig = Rig::new("loom.midi.note", &[("channel", 0.0), ("bend-range", 2.0)]);
+        if how.is_some() {
+            // The channel goes to 2, which ignores channel 1 below, and the
+            // bend range goes to 12 semitones.
+            rig.assign("channel", 2.0 / 16.0);
+            rig.assign("bend-range", 10.0 / 48.0);
+        }
+        rig.listen("pitch", "gate");
+        rig.render(256);
+        if let Some(how) = how {
+            rig.remove(how);
+        }
+        // Channel 1 (0 on the wire): a note, then a bend halfway up.
+        assert!(rig.parts.midi.send(MidiEvent::note_on(10, 0, 67, 100)));
+        assert!(rig.parts.midi.send(MidiEvent::from_bytes(20, &[0xE0, 0x00, 0x60])));
+        rig.render(256)
+    }
+
+    let reference = run(None);
+    assert!(reference.1.contains(&1.0), "the reference plays the note");
+    for how in REMOVALS {
+        assert_eq!(run(Some(how)), reference, "{how:?}");
+    }
+}
+
+#[test]
+fn noise_returns_to_base_seed() {
+    fn run(how: Option<Removal>) -> (Vec<f32>, Vec<f32>) {
+        let mut rig = Rig::new("loom.osc.noise", &[("seed", 1.0)]);
+        if how.is_some() {
+            // The seed goes to 101.
+            rig.assign("seed", 100.0 / 65_534.0);
+        }
+        rig.listen("out", "out");
+        let before = rig.render(256).0;
+        if let Some(how) = how {
+            rig.remove(how);
+        }
+        (before, rig.render(256).0)
+    }
+
+    // Back on the base seed, the pattern starts again from that seed.
+    let (reference, _) = run(None);
+    for how in REMOVALS {
+        let (before, after) = run(Some(how));
+        assert_ne!(before, reference, "{how:?}: modulation changes the seed");
+        assert_eq!(after, reference, "{how:?}");
+    }
 }

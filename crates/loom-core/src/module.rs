@@ -159,6 +159,11 @@ impl<'a> PortIo<'a> {
     /// [`Module::set_param`](crate::Module::set_param), which is constant for
     /// the block.
     ///
+    /// Use each value for its frame only, in a local that falls back to the
+    /// base. Do not store it in a field that `set_param` owns: the engine does
+    /// not call `set_param` again when an assignment is removed, so the
+    /// module would keep the last modulated value instead of the knob's.
+    ///
     /// The slice does not borrow `self`, so it can be held across
     /// [`PortIo::split`].
     #[inline]
