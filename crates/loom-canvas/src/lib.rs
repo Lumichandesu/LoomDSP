@@ -25,4 +25,4 @@ pub use scene::{
     TILE_WIDTH, WidgetView, WidgetViewKind, fit_label, snap, tile_size,
 };
 pub use theme::Palette;
-pub use widget::{CanvasEvent, PatchCanvas};
+pub use widget::{CanvasEvent, LearnView, PatchCanvas};

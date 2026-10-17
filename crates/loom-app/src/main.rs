@@ -6,6 +6,7 @@
 
 mod alerts;
 mod layout;
+mod learn;
 mod lights;
 mod live;
 mod monitor;
@@ -18,7 +19,7 @@ use iced::widget::{
 };
 use iced::{Color, Element, Length, Point, Subscription, Theme};
 use live::Live;
-use loom_canvas::{CanvasEvent, HoverText, PanelValues, PatchCanvas, Scene};
+use loom_canvas::{CanvasEvent, HoverText, LearnView, PanelValues, PatchCanvas, Scene};
 use loom_core::{
     Controller, EngineConfig, EngineParts, InputRef, MidiEvent, ModuleId, OutputRef, ProbeId, create_engine,
 };
@@ -76,6 +77,22 @@ enum Message {
     Lights(Vec<(lights::Light, f32)>),
     /// New levels for meter probes.
     Meters(Vec<(ProbeId, live::Level)>),
+    /// Turn MIDI learn mode on or off.
+    ToggleLearn,
+    /// In learn mode, arm a parameter from the inspector.
+    LearnParam {
+        module: u32,
+        index: usize,
+    },
+    /// Remove a parameter's MIDI mapping.
+    Unmap {
+        module: u32,
+        index: usize,
+    },
+    /// A MIDI control change arrived.
+    Midi,
+    /// A key, while learn mode listens for Escape.
+    Key(iced::keyboard::Event),
 }
 
 struct App {
@@ -116,6 +133,12 @@ struct App {
     meter: FrameMeter,
     measuring: bool,
     animating: bool,
+    /// MIDI learn mode (`docs/design/midi-learn.md`).
+    learning: bool,
+    /// The parameter the next control change maps to.
+    armed: Option<learn::Armed>,
+    /// What learn mode shows on the canvas.
+    learn_view: LearnView,
 }
 
 impl App {
@@ -233,6 +256,9 @@ impl App {
             meter: FrameMeter::default(),
             measuring: args.bench,
             animating: args.bench,
+            learning: false,
+            armed: None,
+            learn_view: LearnView::default(),
         };
         if app.status.is_empty() {
             app.report();
@@ -258,7 +284,22 @@ impl App {
             iced::time::every(Duration::from_millis(500)).map(|_| Message::Tick)
         };
         let telemetry = Subscription::run_with(self.monitor.clone(), monitor::stream).map(Message::Meters);
-        Subscription::batch([main, self.light_watch(), telemetry])
+        Subscription::batch([main, self.light_watch(), telemetry, self.midi_watch()])
+    }
+
+    /// Wakes the UI when control changes arrive, while there is something to
+    /// update: mapped parameters to follow, or learn mode waiting for MIDI.
+    /// In learn mode, it also listens for Escape.
+    fn midi_watch(&self) -> Subscription<Message> {
+        let mapped = self.controller.graph().midi_mappings().next().is_some();
+        let watch = (mapped || self.learning).then(|| {
+            let watch = learn::Watch {
+                reader: self.controller.midi_reader(),
+            };
+            Subscription::run_with(watch, learn::stream).map(|_| Message::Midi)
+        });
+        let keys = self.learning.then(|| iced::keyboard::listen().map(Message::Key));
+        Subscription::batch(watch.into_iter().chain(keys))
     }
 
     /// Watches the lights on screen, and sends a message only when one
@@ -295,6 +336,79 @@ impl App {
         layout::auto_layout(&self.controller, &mut self.positions);
         self.scene = scene::build(&self.controller, &self.positions);
         self.refresh_values();
+        self.refresh_learn();
+    }
+
+    /// Rebuilds what learn mode shows, after mappings or the armed
+    /// parameter changed. A removed module disarms its parameter.
+    fn refresh_learn(&mut self) {
+        if let Some(armed) = self.armed
+            && self.controller.graph().node(ModuleId(armed.param.0)).is_none()
+        {
+            self.armed = None;
+        }
+        self.learn_view = learn::view(&self.controller, self.armed);
+    }
+
+    /// Arms a parameter in learn mode, or disarms it if it is armed.
+    fn arm(&mut self, param: learn::Param) {
+        if self.armed.is_some_and(|armed| armed.param == param) {
+            self.armed = None;
+            self.status = "MIDI learn: click a control to map it".to_string();
+        } else {
+            self.armed = Some(learn::Armed {
+                param,
+                serial: self.controller.last_control_change().map(|seen| seen.serial),
+            });
+            self.status = format!(
+                "Move a MIDI control to map it to {}",
+                learn::param_name(&self.controller, param)
+            );
+        }
+        self.refresh_learn();
+    }
+
+    /// Follows control changes: mapped parameters on screen, and the armed
+    /// parameter in learn mode.
+    fn midi_arrived(&mut self) {
+        if !self.controller.sync_midi().is_empty() {
+            self.refresh_values();
+        }
+        let Some(armed) = self.armed else { return };
+        let Some(seen) = self.controller.last_control_change() else {
+            return;
+        };
+        if Some(seen.serial) == armed.serial {
+            return;
+        }
+        let (module, index) = armed.param;
+        match self.controller.learn_midi(seen, ModuleId(module), index) {
+            Ok((id, removed)) => {
+                let mapping = self
+                    .controller
+                    .graph()
+                    .midi_mappings()
+                    .find(|(i, _)| *i == id)
+                    .map(|(_, m)| *m);
+                self.armed = None;
+                self.commit();
+                if let Some(mapping) = mapping {
+                    self.status = learn::mapped_status(&self.controller, mapping, &removed);
+                }
+            }
+            Err(e) => {
+                self.armed = None;
+                self.status = format!("error: {e}");
+                self.refresh_learn();
+            }
+        }
+    }
+
+    fn stop_learning(&mut self) {
+        self.learning = false;
+        self.armed = None;
+        self.status = "MIDI learn off".to_string();
+        self.refresh_learn();
     }
 
     /// Rebuilds the control, light, and meter values. Only changed values
@@ -461,6 +575,38 @@ impl App {
                 self.lights.extend(readings);
                 self.refresh_values();
             }
+            Message::ToggleLearn => {
+                if self.learning {
+                    self.stop_learning();
+                } else {
+                    self.learning = true;
+                    self.status = "MIDI learn: click a control to map it".to_string();
+                    self.refresh_learn();
+                }
+            }
+            Message::LearnParam { module, index } => {
+                if self.learning {
+                    self.arm((module, index));
+                }
+            }
+            Message::Unmap { module, index } => match self.controller.unmap_midi(ModuleId(module), index) {
+                Ok(Some(mapping)) => {
+                    self.commit();
+                    self.status = format!(
+                        "Removed {} from {}",
+                        mapping.control,
+                        learn::param_name(&self.controller, (module, index))
+                    );
+                }
+                Ok(None) => {}
+                Err(e) => self.status = format!("error: {e}"),
+            },
+            Message::Midi => self.midi_arrived(),
+            Message::Key(iced::keyboard::Event::KeyPressed {
+                key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+                ..
+            }) if self.learning => self.stop_learning(),
+            Message::Key(_) => {}
         }
     }
 
@@ -513,6 +659,11 @@ impl App {
                     self.set_param(module, index, spec.default);
                 }
             }
+            CanvasEvent::Learn { module, widget } => {
+                if let Some((index, _, _)) = scene::control_param(&self.controller, module, widget) {
+                    self.arm((module, index));
+                }
+            }
             CanvasEvent::VisibleDisplays(ids) => {
                 self.visible_displays = ids;
                 self.sync_probes();
@@ -534,7 +685,8 @@ impl App {
         let canvas = PatchCanvas::new(&self.scene, &self.selection, Message::Canvas)
             .values(&self.values)
             .frame_key(self.frame_key)
-            .animate(self.animating);
+            .animate(self.animating)
+            .learn(self.learning.then_some(&self.learn_view));
 
         let body = row![
             container(canvas).width(Length::Fill).height(Length::Fill),
@@ -563,6 +715,13 @@ impl App {
                 .text_size(13),
             button(text("Add").size(13)).on_press_maybe(self.picked.as_ref().map(|_| Message::Add)),
             hold,
+            button(text("MIDI learn").size(13))
+                .on_press(Message::ToggleLearn)
+                .style(if self.learning {
+                    button::primary
+                } else {
+                    button::secondary
+                }),
             button(text("Save").size(13)).on_press(Message::Save),
         ]
         .spacing(8)
@@ -594,28 +753,62 @@ impl App {
                         if let Some(name) = hover.name {
                             tip = tip.push(text(name).size(11).color(DIM));
                         }
-                        items = items.push(
-                            column![
-                                row![
-                                    tooltip(
-                                        text(spec.label).size(12),
-                                        container(tip).padding(6).max_width(260).style(container::rounded_box),
-                                        tooltip::Position::Top,
-                                    ),
+                        let mapping = graph.midi_mapping_of(ModuleId(id), index).map(|(_, m)| m.control);
+                        if self.learning {
+                            // In learn mode a row arms its parameter, and its
+                            // value does not change (midi-learn.md).
+                            let armed = self.armed.is_some_and(|a| a.param == (id, index));
+                            let detail = match (armed, mapping) {
+                                (true, _) => "Waiting for MIDI...".to_string(),
+                                (false, Some(control)) => control.to_string(),
+                                (false, None) => param::format(spec, *value),
+                            };
+                            items = items.push(
+                                button(row![
+                                    text(spec.label).size(12),
                                     space::horizontal(),
-                                    text(param::format(spec, *value)).size(12).color(DIM),
-                                ],
-                                slider(0.0..=1.0, spec.normalize(*value), move |position| {
-                                    Message::Param {
-                                        module: id,
-                                        index,
-                                        position,
-                                    }
-                                })
-                                .step(param::slider_step(spec)),
-                            ]
-                            .spacing(2),
-                        );
+                                    text(detail).size(12)
+                                ])
+                                .width(Length::Fill)
+                                .style(if armed { button::primary } else { button::secondary })
+                                .on_press(Message::LearnParam { module: id, index }),
+                            );
+                            continue;
+                        }
+                        let mut row_items = column![
+                            row![
+                                tooltip(
+                                    text(spec.label).size(12),
+                                    container(tip).padding(6).max_width(260).style(container::rounded_box),
+                                    tooltip::Position::Top,
+                                ),
+                                space::horizontal(),
+                                text(param::format(spec, *value)).size(12).color(DIM),
+                            ],
+                            slider(0.0..=1.0, spec.normalize(*value), move |position| {
+                                Message::Param {
+                                    module: id,
+                                    index,
+                                    position,
+                                }
+                            })
+                            .step(param::slider_step(spec)),
+                        ]
+                        .spacing(2);
+                        if let Some(control) = mapping {
+                            row_items = row_items.push(
+                                row![
+                                    text(control.to_string()).size(11).color(DIM),
+                                    space::horizontal(),
+                                    button(text("Remove").size(11))
+                                        .padding([1, 6])
+                                        .style(button::text)
+                                        .on_press(Message::Unmap { module: id, index }),
+                                ]
+                                .align_y(iced::Alignment::Center),
+                            );
+                        }
+                        items = items.push(row_items);
                     }
                     items.into()
                 }
@@ -737,7 +930,8 @@ Drag tiles to move them. Shift-click or drag a box to select several.\n\
 Drag a knob up or down; Shift for fine steps; double-click resets it.\n\
 With a module selected, Tab moves between its controls and the arrow keys change them.\n\
 Right-drag or two-finger scroll to pan. Wheel or Cmd/Ctrl-scroll to zoom.\n\
-F or Home frames the patch. Delete removes the selection.";
+F or Home frames the patch. Delete removes the selection.\n\
+MIDI learn: click a control, then move a knob on your controller. Escape ends it.";
 
 /// Frame timing over the last second.
 #[derive(Default)]

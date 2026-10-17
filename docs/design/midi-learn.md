@@ -9,7 +9,7 @@ How a performer links a hardware knob or fader to any parameter in a few seconds
 - **Background:** [parameter mapping](modulation.md#parameter-mapping) (value to position and back).
 - **Prior art:** most DAWs and software modular tools have a "learn" gesture: arm a control, move a hardware control, and the two are linked. We use the idea, in our own words.
 - **Issues:** [#24](https://github.com/brylie/LoomDSP/issues/24).
-- **Code:** not built yet.
+- **Code:** `crates/loom-core/src/midi_map.rs` (mappings and feedback), `Engine::apply_midi_maps`, the `Controller` MIDI methods, the `midi` list in `loom-patch`, `crates/loom-app/src/learn.rs` (learn mode), and `LearnView` in `loom-canvas`. Tests: `crates/loom-modules/tests/midi_learn.rs`.
 
 <!-- Spec first: agree on this before building. Keep it true as the code is
      built. See README.md in this folder. -->
@@ -66,7 +66,7 @@ The user touches the control on screen, then moves the hardware control. Learn m
 1. **Mappings run in the engine.** The controller compiles the patch's mappings into a table and sends it to the audio thread with the schedule. The engine reads each incoming control change, looks it up, and sets the base value. *Why:* the same patch must respond to the same controller in the desktop app, in `loom play`, and in an exported plugin (ADR-0004), none of which can rely on the app's UI thread. It also adds no latency beyond the audio buffer.
 2. **The engine reports values back to the controller.** After each block, the engine writes the latest value of each mapped parameter that changed into a latest-value table, like display values ([panels](panels.md)). The controller reads it and updates its graph. *Why:* the graph is what the UI draws and what is saved. A latest-value table loses nothing that matters if the UI is slow, and never makes the audio thread wait.
 3. **Learn reads control changes from the engine, too.** The engine records the last control change it received (channel, controller number, and a counter that goes up with each one). The controller reads it while a parameter is armed. *Why:* every host sends MIDI to the engine already. Learn then works the same way in every host, with no second MIDI path.
-4. **A mapped control change applies at the start of the block it arrives in**, like a screen knob change. *Why:* an unmodulated parameter is constant for a block, and one block is a few milliseconds, too short to hear on a knob move. The desktop host stamps live MIDI at frame 0 today anyway. Output stays deterministic for the same input and block size. An offline render that feeds control changes at frame offsets would depend on the block size. No render path feeds control changes yet; revisit this rule when one does.
+4. **A mapped control change applies at the start of the buffer it arrives in**, like a screen knob change. *Why:* an unmodulated parameter is constant for a block, and one block is a few milliseconds, too short to hear on a knob move. The desktop host stamps live MIDI at frame 0 today anyway. Output stays deterministic for the same input and block size. An offline render that feeds control changes at frame offsets would depend on the block size. No render path feeds control changes yet; revisit this rule when one does.
 5. **A mapping matches one channel and one controller number,** the ones the user moved while learning. *Why:* what the user moved is what works. Most controllers send each knob on one channel, so this needs no setting. Two controllers that send the same controller number on different channels stay apart.
 6. **Mapped control changes still reach modules.** A MIDI input module (#30) still sees every control change. *Why:* hiding messages that a mapping uses is a surprise that is hard to debug. If this causes trouble in use, a later change can add a "consume" option.
 7. **Mappings are saved with the patch.** A new list in the patch file, empty when missing. The patch format stays at version 1. *Why:* the issue asks for it, and a patch should play the same way when opened again. Per-device mappings that live outside patches are FR-MIDI-06, P2.
@@ -90,17 +90,17 @@ midi: [
 - [ ] Pressing **MIDI learn** starts learn mode. Clicking a tile control or an inspector row in learn mode arms its parameter and does not change its value.
 - [ ] Given an armed parameter, when a control change arrives, then one mapping is made, the parameter takes the control's value, nothing is armed, and learn mode stays on.
 - [ ] Outside learn mode, clicking a control and then moving a hardware control makes no mapping.
-- [ ] Given a mapping, when its control change arrives, then the parameter's base value is `denormalize(value / 127)`: the minimum at 0, the maximum at 127, and the middle of a logarithmic range at 64 (within one step).
-- [ ] A control change on another channel or controller number does not move the parameter.
-- [ ] Learning a mapped parameter replaces its mapping. Learning a hardware control that is already mapped moves the mapping to the new parameter, and the status bar names the old one.
+- [x] Given a mapping, when its control change arrives, then the parameter's base value is `denormalize(value / 127)`: the minimum at 0, the maximum at 127, and the middle of a logarithmic range at 64 (within one step).
+- [x] A control change on another channel or controller number does not move the parameter.
+- [x] Learning a mapped parameter replaces its mapping. Learning a hardware control that is already mapped moves the mapping to the new parameter, and the status bar names the old one.
 - [ ] Clicking an armed control disarms it. Escape or a second press of **MIDI learn** ends learn mode with no change.
 - [ ] In learn mode, every mapped control in view shows its `CC` label.
 - [ ] The tile knob and the inspector show the value set by the hardware within one UI frame.
-- [ ] A mapped control change still reaches a MIDI input module.
-- [ ] A patch with mappings saves and loads with the same mappings. A patch without a `midi` list loads with none. A patch with two mappings on one parameter, or on one channel and controller number, fails to load with a clear error.
-- [ ] Removing a mapping in the inspector stops the control from moving the parameter. Deleting a module removes its mappings.
+- [x] A mapped control change still reaches a MIDI input module.
+- [x] A patch with mappings saves and loads with the same mappings. A patch without a `midi` list loads with none. A patch with two mappings on one parameter, or on one channel and controller number, fails to load with a clear error.
+- [x] Removing a mapping in the inspector stops the control from moving the parameter. Deleting a module removes its mappings.
 - [ ] `loom play` with a patch that has mappings responds to the controller with no UI.
-- [ ] Processing a mapped control change does not allocate (`tests/no_alloc.rs`).
+- [x] Processing a mapped control change does not allocate (`tests/no_alloc.rs`).
 
 ## Out of scope
 

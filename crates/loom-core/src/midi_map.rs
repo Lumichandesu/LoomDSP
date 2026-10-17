@@ -14,6 +14,7 @@
 use crate::descriptor::ParamSpec;
 use crate::graph::ModuleId;
 use std::fmt;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Number of MIDI channels.
@@ -154,6 +155,32 @@ impl MidiFeedback {
             value: (packed & 0x7F) as u8,
             serial,
         })
+    }
+}
+
+/// Reads the last control change from any thread, for example a UI watcher
+/// that wakes the UI only when MIDI arrives. Cheap to clone. Get one from
+/// [`Controller::midi_reader`](crate::Controller::midi_reader).
+#[derive(Clone)]
+pub struct MidiReader {
+    feedback: Arc<MidiFeedback>,
+}
+
+impl fmt::Debug for MidiReader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("MidiReader")
+    }
+}
+
+impl MidiReader {
+    pub(crate) fn new(feedback: Arc<MidiFeedback>) -> Self {
+        Self { feedback }
+    }
+
+    /// The last control change the engine received, or `None` before the
+    /// first. Its serial changes with every control change, mapped or not.
+    pub fn last_control_change(&self) -> Option<ControlChangeSeen> {
+        self.feedback.last()
     }
 }
 

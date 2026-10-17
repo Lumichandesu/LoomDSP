@@ -42,7 +42,7 @@ pub use engine::{Engine, EngineConfig, EngineStats};
 pub use error::LoomError;
 pub use graph::{Assignment, AssignmentId, Graph, InputRef, ModuleId, Node, OutputRef};
 pub use midi::{MidiEvent, MidiMessage};
-pub use midi_map::{ControlChangeSeen, MidiControl, MidiMapping, MidiMappingId, control_value};
+pub use midi_map::{ControlChangeSeen, MidiControl, MidiMapping, MidiMappingId, MidiReader, control_value};
 pub use module::{Module, PortIo, ProcessContext, testing};
 pub use registry::{ModuleKind, Registry, RegistryNote};
 pub use signal::SignalType;

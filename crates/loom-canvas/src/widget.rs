@@ -15,7 +15,7 @@ use iced::advanced::{Clipboard, Shell, Widget};
 use iced::{Color, Element, Event, Font, Length, Pixels, Point, Rectangle, Size, Vector};
 use iced::{alignment, keyboard, mouse, window};
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -76,6 +76,25 @@ pub enum CanvasEvent {
     /// The modules whose lights or meters are on screen, at a zoom where
     /// they are drawn, changed. Only these need their values read.
     VisibleDisplays(Vec<u32>),
+    /// In MIDI learn mode, a control was clicked: arm it, or disarm it if it
+    /// is armed. Its value does not change (`docs/design/midi-learn.md`).
+    Learn {
+        /// Module ID.
+        module: u32,
+        /// Index in the module's panel widgets.
+        widget: usize,
+    },
+}
+
+/// What MIDI learn mode shows on the canvas. While the canvas has one, a
+/// click on a control arms it instead of changing it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LearnView {
+    /// The armed control: module ID and widget index.
+    pub armed: Option<(u32, usize)>,
+    /// Mapping labels, such as `CC 74`, by module ID and widget index. They
+    /// show in place of the control's caption.
+    pub labels: BTreeMap<(u32, usize), String>,
 }
 
 /// The patch canvas. Draws a [`Scene`] and reports gestures as
@@ -88,6 +107,7 @@ pub struct PatchCanvas<'a, Message> {
     on_event: Box<dyn Fn(CanvasEvent) -> Message + 'a>,
     frame_key: u64,
     animate: bool,
+    learn: Option<&'a LearnView>,
 }
 
 impl<'a, Message> PatchCanvas<'a, Message> {
@@ -101,7 +121,14 @@ impl<'a, Message> PatchCanvas<'a, Message> {
             on_event: Box::new(on_event),
             frame_key: 0,
             animate: false,
+            learn: None,
         }
+    }
+
+    /// Turns on MIDI learn mode, with what it shows.
+    pub fn learn(mut self, learn: Option<&'a LearnView>) -> Self {
+        self.learn = learn;
+        self
     }
 
     /// Sets the live values of panel controls and lights.
@@ -758,6 +785,10 @@ impl<Message> PatchCanvas<'_, Message> {
             state.focus = None;
         }
         match hit {
+            Hit::Widget { module, widget } if self.learn.is_some() && self.is_control(module, widget) => {
+                self.select_for_edit(module, shell);
+                self.emit(shell, CanvasEvent::Learn { module, widget });
+            }
             Hit::Widget { module, widget } => {
                 self.select_for_edit(module, shell);
                 state.focus = Some((module, widget));
@@ -958,6 +989,29 @@ impl<Message> PatchCanvas<'_, Message> {
                 .shapes
                 .push(Shape::new(ring, radius, Color::TRANSPARENT, p.focus, 1.5));
         }
+        // MIDI learn mode outlines every control, and the armed one more
+        // strongly, so the user sees what a click will do.
+        if let Some(learn) = self.learn {
+            for module in self.scene.modules() {
+                for (index, view) in module.panel.widgets.iter().enumerate() {
+                    if !view.is_control() {
+                        continue;
+                    }
+                    let Some(rect) = module.widget_bounds(index) else {
+                        continue;
+                    };
+                    let (ring, radius) = focus_ring(&view.kind, rect);
+                    let (colour, width) = if learn.armed == Some((module.id, index)) {
+                        (p.selection, 2.5)
+                    } else {
+                        (p.focus, 1.0)
+                    };
+                    overlay
+                        .shapes
+                        .push(Shape::new(ring, radius, Color::TRANSPARENT, colour, width));
+                }
+            }
+        }
         match &state.interaction {
             Interaction::Wiring { from } => {
                 if let (Some(start), Some(port), Some(cursor)) =
@@ -1048,7 +1102,16 @@ impl<Message> PatchCanvas<'_, Message> {
                 };
                 // A focused or turning knob shows its value instead of its
                 // caption.
+                // In MIDI learn mode, a mapped control shows its mapping.
+                let learned = match item.kind {
+                    TextKind::Caption(widget) => self
+                        .learn
+                        .and_then(|learn| learn.labels.get(&(module.id, widget)))
+                        .map(String::as_str),
+                    _ => None,
+                };
                 let value = match item.kind {
+                    _ if learned.is_some() => learned,
                     TextKind::Caption(widget) if active == Some((module.id, widget)) => values
                         .get(module.id, widget)
                         .filter(|_| matches!(module.panel.widgets[widget].kind, WidgetViewKind::Knob { .. }))

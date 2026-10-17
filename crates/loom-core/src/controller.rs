@@ -7,7 +7,9 @@ use crate::engine::{Command, Engine, EngineConfig, EngineStats, Garbage};
 use crate::error::LoomError;
 use crate::graph::{Assignment, AssignmentId, Graph, InputRef, ModuleId, Node, OutputRef};
 use crate::midi::MidiEvent;
-use crate::midi_map::{ControlChangeSeen, MidiControl, MidiFeedback, MidiMapping, MidiMappingId, control_value};
+use crate::midi_map::{
+    ControlChangeSeen, MidiControl, MidiFeedback, MidiMapping, MidiMappingId, MidiReader, control_value,
+};
 use crate::registry::Registry;
 use crate::telemetry::{ProbeId, ProbeKind, Telemetry, TelemetrySender};
 use crate::transport::{TimeSignature, TransportSettings, clamp_tempo};
@@ -438,6 +440,11 @@ impl Controller {
     /// MIDI learn. `None` before the first one.
     pub fn last_control_change(&self) -> Option<ControlChangeSeen> {
         self.midi_feedback.last()
+    }
+
+    /// A handle that reads the last control change from any thread.
+    pub fn midi_reader(&self) -> MidiReader {
+        MidiReader::new(self.midi_feedback.clone())
     }
 
     /// Copies the values MIDI mappings set in the engine into the graph, so
