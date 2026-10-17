@@ -4,8 +4,8 @@
 //! to drive them, or any other signal to bend the wave shape.
 
 use loom_core::{
-    Module, ModuleConfig, ModuleDescriptor, ModuleRole, Panel, ParamOptions, ParamSpec, PortDefault, PortIo, PortSpec,
-    ProcessContext, SignalType,
+    Module, ModuleConfig, ModuleDescriptor, ModuleRole, Panel, ParamOptions, ParamSpec, Polarity, PortDefault, PortIo,
+    PortSpec, ProcessContext, SignalType,
 };
 use std::f32::consts::TAU;
 
@@ -22,6 +22,8 @@ pub static SINE: ModuleDescriptor = ModuleDescriptor {
         signal: SignalType::Phase,
         description: "Position in the wave, from 0 to 1. One ramp is one cycle.",
         default: PortDefault::Value(0.0),
+
+        polarity: Polarity::Unipolar,
     }],
     outputs: &[PortSpec {
         name: "out",
@@ -29,6 +31,8 @@ pub static SINE: ModuleDescriptor = ModuleDescriptor {
         signal: SignalType::Audio,
         description: "Sine wave from -1 to 1.",
         default: PortDefault::Value(0.0),
+
+        polarity: Polarity::Bipolar,
     }],
     params: &[],
     role: ModuleRole::Dsp(|_| Box::new(Sine)),
@@ -60,6 +64,8 @@ pub static SAW: ModuleDescriptor = ModuleDescriptor {
         signal: SignalType::Phase,
         description: "Position in the wave, from 0 to 1. One ramp is one cycle.",
         default: PortDefault::Value(0.0),
+
+        polarity: Polarity::Unipolar,
     }],
     outputs: &[PortSpec {
         name: "out",
@@ -67,6 +73,8 @@ pub static SAW: ModuleDescriptor = ModuleDescriptor {
         signal: SignalType::Audio,
         description: "Saw wave from -1 to 1.",
         default: PortDefault::Value(0.0),
+
+        polarity: Polarity::Bipolar,
     }],
     params: &[],
     role: ModuleRole::Dsp(|_| Box::new(Saw { previous: 0.0 })),
@@ -130,6 +138,8 @@ pub static NOISE: ModuleDescriptor = ModuleDescriptor {
         signal: SignalType::Audio,
         description: "White noise from -1 to 1.",
         default: PortDefault::Value(0.0),
+
+        polarity: Polarity::Bipolar,
     }],
     params: &[ParamSpec {
         name: "seed",
@@ -157,8 +167,16 @@ struct Noise {
 
 impl Module for Noise {
     fn process(&mut self, _ctx: &ProcessContext<'_>, io: &mut PortIo<'_>) {
+        let seed = io.modulated(0);
         let ([], [out]) = io.split::<0, 1>();
-        for out in out.iter_mut() {
+        for (i, out) in out.iter_mut().enumerate() {
+            if let Some(samples) = seed {
+                let next = samples[i].round().max(1.0) as u32;
+                if next != self.seed {
+                    self.seed = next;
+                    self.state = next;
+                }
+            }
             // xorshift32: fast, deterministic, good enough for audio noise.
             let mut x = self.state;
             x ^= x << 13;

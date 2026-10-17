@@ -11,19 +11,27 @@
 //!    at a time. Each loop runs one sample at a time.
 //! 4. Inside a loop, user-placed unit delays break the cycle. If cycles
 //!    remain, the compiler inserts its own one-sample delays and reports
-//!    where, so the UI can show them.
-//! 5. Bind unconnected inputs to their default (ADR-0015): the zero buffer,
+//!    where, so the UI can show them. A modulation assignment is broken
+//!    before a cable, so a modulation loop does not delay the audio path.
+//! 5. Give each modulated parameter a buffer, filled from its base value
+//!    and its sources just before the target module runs.
+//! 6. Bind unconnected inputs to their default (ADR-0015): the zero buffer,
 //!    a constant buffer per distinct value, or one shared buffer per
 //!    transport signal that the engine fills at the start of each block.
 
-use crate::descriptor::{ModuleRole, PortDefault};
-use crate::graph::{Graph, InputRef, ModuleId, OutputRef};
+use crate::descriptor::{ModuleRole, ParamSpec, Polarity, PortDefault};
+use crate::graph::{AssignmentId, Graph, InputRef, ModuleId, OutputRef};
 use crate::telemetry::{ProbeId, ProbeKind};
+use loom_rt::Smoothed;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Marks tap keys created by the compiler, so they never clash with user
 /// unit delay keys (which are module IDs).
 const AUTO_TAP: u64 = 1 << 63;
+
+/// Marks a tap inserted on a modulation assignment. Bit 62 keeps these clear
+/// of cable taps, whose keys use the module id shifted by 16 under `AUTO_TAP`.
+const ASSIGN_TAP: u64 = AUTO_TAP | (1 << 62);
 
 /// A feedback loop found by the compiler.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +41,8 @@ pub struct FeedbackLoop {
     /// Cables where the compiler inserted a one-sample delay. Empty when the
     /// loop already contains a user unit delay in every cycle.
     pub inserted_delays: Vec<(OutputRef, InputRef)>,
+    /// Modulation assignments where the compiler inserted a one-sample delay.
+    pub inserted_assignment_delays: Vec<AssignmentId>,
 }
 
 /// What the compiler found.
@@ -49,6 +59,11 @@ impl CompileReport {
     pub fn inserted_delays(&self) -> impl Iterator<Item = &(OutputRef, InputRef)> {
         self.loops.iter().flat_map(|l| l.inserted_delays.iter())
     }
+
+    /// All assignment delays the compiler inserted, across all loops.
+    pub fn inserted_assignment_delays(&self) -> impl Iterator<Item = &AssignmentId> {
+        self.loops.iter().flat_map(|l| l.inserted_assignment_delays.iter())
+    }
 }
 
 pub(crate) struct ModuleOp {
@@ -56,6 +71,39 @@ pub(crate) struct ModuleOp {
     pub inputs: (u32, u32),
     pub outputs: (u32, u32),
     pub connected: u64,
+    /// Range into [`Schedule::fills`].
+    pub fills: (u32, u32),
+    /// Range into [`Schedule::param_ptrs`], one entry per modulated parameter.
+    pub params: (u32, u32),
+}
+
+/// One source of a modulated parameter. `state` indexes [`Schedule::assignments`].
+pub(crate) struct ModSource {
+    pub state: u32,
+    pub buffer: *const f32,
+}
+
+/// A parameter the engine fills before its module runs.
+pub(crate) struct ParamFill {
+    /// `(module id << 32) | param index`. Matches smoother state across swaps.
+    pub key: u64,
+    pub slot: u32,
+    pub param: u16,
+    pub spec: &'static ParamSpec,
+    pub base: f32,
+    pub smooth: Option<Smoothed>,
+    pub buffer: *mut f32,
+    pub sources: Vec<ModSource>,
+}
+
+/// Depth, polarity, and enabled flag. The audio thread updates these without
+/// recompiling. Sorted by [`AssignmentRuntime::id`].
+pub(crate) struct AssignmentRuntime {
+    pub id: AssignmentId,
+    pub depth: f32,
+    pub enabled: bool,
+    pub polarity: Option<Polarity>,
+    pub source_polarity: Polarity,
 }
 
 pub(crate) struct Tap {
@@ -138,6 +186,9 @@ pub(crate) struct Schedule {
     pub outputs: Vec<OutputOp>,
     pub probes: Vec<ProbeOp>,
     pub transport: TransportBuffers,
+    pub fills: Vec<ParamFill>,
+    pub assignments: Vec<AssignmentRuntime>,
+    pub param_ptrs: Vec<(u16, *const f32)>,
 }
 
 // SAFETY: the raw pointers only point into buffers owned by this schedule.
@@ -160,6 +211,9 @@ impl Schedule {
             outputs: Vec::new(),
             probes: Vec::new(),
             transport: TransportBuffers::default(),
+            fills: Vec::new(),
+            assignments: Vec::new(),
+            param_ptrs: Vec::new(),
         }
     }
 
@@ -173,6 +227,24 @@ impl Schedule {
             }
             if j < old.taps.len() && old.taps[j].key == tap.key {
                 tap.state = old.taps[j].state;
+            }
+        }
+    }
+
+    /// Copies in-flight base smoothing onto the new schedule, matched by key.
+    /// Runs on the audio thread: no allocation.
+    pub fn take_smooth_state_from(&mut self, old: &Schedule) {
+        for fill in &mut self.fills {
+            let Some(smooth) = fill.smooth.as_mut() else {
+                continue;
+            };
+            for previous in &old.fills {
+                if previous.key == fill.key
+                    && let Some(previous) = previous.smooth
+                {
+                    *smooth = previous;
+                    break;
+                }
             }
         }
     }
@@ -190,12 +262,44 @@ enum StepSpec {
     Loop { modules: Vec<usize>, taps: Vec<usize> },
 }
 
+/// An edge inside a feedback loop. Assignment edges are broken before cables.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Dep {
+    Cable(InputRef),
+    Assignment(AssignmentId),
+}
+
+struct CompiledAssignment {
+    id: AssignmentId,
+    source: OutputRef,
+    target_node: usize,
+    param: usize,
+    depth: f32,
+    enabled: bool,
+    polarity: Option<Polarity>,
+    source_polarity: Polarity,
+}
+
+struct SourceSpec {
+    /// Index into the compiled assignment list.
+    assignment: usize,
+    /// Buffer index the fill reads. A delay tap when the assignment was broken.
+    buffer: usize,
+}
+
+struct FillSpec {
+    param: usize,
+    buffer: usize,
+    sources: Vec<SourceSpec>,
+}
+
 /// Compiles the graph. `max_block` is the buffer length. `probes` are output
 /// ports to read for telemetry; probes on unknown modules or ports are
-/// skipped.
+/// skipped. `sample_rate` sets the base-value smoother for modulated parameters.
 pub(crate) fn compile(
     graph: &Graph,
     probes: &BTreeMap<ProbeId, (OutputRef, ProbeKind)>,
+    sample_rate: f32,
     max_block: usize,
 ) -> (Schedule, CompileReport) {
     let ids: Vec<ModuleId> = graph.nodes.keys().copied().collect();
@@ -218,12 +322,46 @@ pub(crate) fn compile(
         .collect();
     let source_buffer = |from: OutputRef| out_buf[index_of[&from.module]][from.port];
 
-    // 2. SCCs.
+    // Assignments the graph can actually schedule. Dangling ones are dropped.
+    let mut compiled = Vec::new();
+    for (id, assignment) in graph.assignments() {
+        let Some(&target_node) = index_of.get(&assignment.target) else {
+            continue;
+        };
+        let Some(&source_node) = index_of.get(&assignment.source.module) else {
+            continue;
+        };
+        let outputs = nodes[source_node].descriptor.outputs;
+        let params = nodes[target_node].descriptor.params;
+        if assignment.source.port >= outputs.len() || assignment.param >= params.len() {
+            continue;
+        }
+        compiled.push(CompiledAssignment {
+            id,
+            source: assignment.source,
+            target_node,
+            param: assignment.param,
+            depth: assignment.depth,
+            enabled: assignment.enabled,
+            polarity: assignment.polarity,
+            source_polarity: outputs[assignment.source.port].polarity,
+        });
+    }
+
+    // 2. SCCs. Cables and assignments are both edges.
     let mut succ: Vec<Vec<usize>> = vec![Vec::new(); n];
     let mut self_loop = vec![false; n];
     for (to, from) in &graph.cables {
         let u = index_of[&from.module];
         let v = index_of[&to.module];
+        succ[u].push(v);
+        if u == v {
+            self_loop[u] = true;
+        }
+    }
+    for assignment in &compiled {
+        let u = index_of[&assignment.source.module];
+        let v = assignment.target_node;
         succ[u].push(v);
         if u == v {
             self_loop[u] = true;
@@ -240,6 +378,8 @@ pub(crate) fn compile(
     // 3 and 4. Steps.
     let mut taps: Vec<TapSpec> = Vec::new();
     let mut overrides: BTreeMap<InputRef, usize> = BTreeMap::new();
+    // Assignment id to the delay buffer the fill should read.
+    let mut delayed: BTreeMap<AssignmentId, usize> = BTreeMap::new();
     let mut steps: Vec<StepSpec> = Vec::new();
     let mut output_nodes: Vec<usize> = Vec::new();
     let mut report = CompileReport {
@@ -292,30 +432,61 @@ pub(crate) fn compile(
         // Edges between DSP members only. Edges into or out of unit delays
         // do not constrain the order: delays emit before and capture after.
         let mut indegree: BTreeMap<usize, usize> = members.iter().map(|&v| (v, 0)).collect();
-        let mut incoming: BTreeMap<usize, Vec<(InputRef, OutputRef)>> = BTreeMap::new();
-        let mut outgoing: BTreeMap<usize, Vec<(InputRef, usize)>> = BTreeMap::new();
+        let mut incoming: BTreeMap<usize, Vec<(Dep, OutputRef)>> = BTreeMap::new();
+        let mut outgoing: BTreeMap<usize, Vec<(Dep, usize)>> = BTreeMap::new();
+        let add_edge = |indegree: &mut BTreeMap<usize, usize>,
+                        incoming: &mut BTreeMap<usize, Vec<(Dep, OutputRef)>>,
+                        outgoing: &mut BTreeMap<usize, Vec<(Dep, usize)>>,
+                        dep: Dep,
+                        from: OutputRef,
+                        v: usize| {
+            *indegree.get_mut(&v).expect("member") += 1;
+            incoming.entry(v).or_default().push((dep, from));
+            outgoing.entry(index_of[&from.module]).or_default().push((dep, v));
+        };
         for (to, from) in &graph.cables {
             let u = index_of[&from.module];
             let v = index_of[&to.module];
             if members.contains(&u) && members.contains(&v) {
-                *indegree.get_mut(&v).expect("member") += 1;
-                incoming.entry(v).or_default().push((*to, *from));
-                outgoing.entry(u).or_default().push((*to, v));
+                add_edge(&mut indegree, &mut incoming, &mut outgoing, Dep::Cable(*to), *from, v);
+            }
+        }
+        for assignment in &compiled {
+            let u = index_of[&assignment.source.module];
+            let v = assignment.target_node;
+            if members.contains(&u) && members.contains(&v) {
+                add_edge(
+                    &mut indegree,
+                    &mut incoming,
+                    &mut outgoing,
+                    Dep::Assignment(assignment.id),
+                    assignment.source,
+                    v,
+                );
             }
         }
 
         let mut ordered = Vec::with_capacity(members.len());
         let mut done: BTreeSet<usize> = BTreeSet::new();
-        let mut broken: BTreeSet<InputRef> = BTreeSet::new();
+        let mut broken: BTreeSet<Dep> = BTreeSet::new();
         let mut ready: BTreeSet<usize> = indegree.iter().filter(|(_, d)| **d == 0).map(|(v, _)| *v).collect();
         let mut inserted = Vec::new();
+        let mut inserted_assignments = Vec::new();
+
+        let unresolved = |v: usize, dep_is: fn(&Dep) -> bool, done: &BTreeSet<usize>, broken: &BTreeSet<Dep>| {
+            incoming
+                .get(&v)
+                .into_iter()
+                .flatten()
+                .any(|(dep, from)| dep_is(dep) && !broken.contains(dep) && !done.contains(&index_of[&from.module]))
+        };
 
         loop {
             while let Some(v) = ready.pop_first() {
                 ordered.push(v);
                 done.insert(v);
-                for (input, w) in outgoing.get(&v).into_iter().flatten() {
-                    if broken.contains(input) {
+                for (dep, w) in outgoing.get(&v).into_iter().flatten() {
+                    if broken.contains(dep) {
                         continue;
                     }
                     let d = indegree.get_mut(w).expect("member");
@@ -328,6 +499,47 @@ pub(crate) fn compile(
             if ordered.len() == members.len() {
                 break;
             }
+            // Prefer to delay an assignment. A modulation loop then keeps the
+            // audio cables on their current sample.
+            let assignment_victim = members
+                .iter()
+                .filter(|v| !done.contains(v))
+                .filter(|v| unresolved(**v, |dep| matches!(dep, Dep::Assignment(_)), &done, &broken))
+                .min_by_key(|v| {
+                    let count = incoming
+                        .get(v)
+                        .into_iter()
+                        .flatten()
+                        .filter(|(dep, _)| matches!(dep, Dep::Assignment(_)))
+                        .count();
+                    (count, **v)
+                });
+            if let Some(&v) = assignment_victim {
+                for (dep, from) in incoming.get(&v).into_iter().flatten() {
+                    let Dep::Assignment(id) = *dep else {
+                        continue;
+                    };
+                    if done.contains(&index_of[&from.module]) || broken.contains(dep) {
+                        continue;
+                    }
+                    buffer_count += 1;
+                    let output = buffer_count - 1;
+                    taps.push(TapSpec {
+                        key: ASSIGN_TAP | u64::from(id.0),
+                        input: Some(source_buffer(*from)),
+                        output,
+                    });
+                    loop_taps.push(taps.len() - 1);
+                    delayed.insert(id, output);
+                    broken.insert(*dep);
+                    inserted_assignments.push(id);
+                    *indegree.get_mut(&v).expect("member") -= 1;
+                }
+                if indegree[&v] == 0 {
+                    ready.insert(v);
+                }
+                continue;
+            }
             // Stuck on a cycle with no unit delay. Pick the remaining module
             // with the fewest unresolved inputs (lowest ID on ties) and put a
             // one-sample delay on each of those inputs.
@@ -336,8 +548,11 @@ pub(crate) fn compile(
                 .filter(|v| !done.contains(v))
                 .min_by_key(|v| (indegree[v], **v))
                 .expect("remaining member");
-            for (input, from) in incoming.get(&v).into_iter().flatten() {
-                if done.contains(&index_of[&from.module]) || broken.contains(input) {
+            for (dep, from) in incoming.get(&v).into_iter().flatten() {
+                let Dep::Cable(input) = *dep else {
+                    continue;
+                };
+                if done.contains(&index_of[&from.module]) || broken.contains(dep) {
                     continue;
                 }
                 buffer_count += 1;
@@ -348,9 +563,9 @@ pub(crate) fn compile(
                     output,
                 });
                 loop_taps.push(taps.len() - 1);
-                overrides.insert(*input, output);
-                broken.insert(*input);
-                inserted.push((*from, *input));
+                overrides.insert(input, output);
+                broken.insert(*dep);
+                inserted.push((*from, input));
                 *indegree.get_mut(&v).expect("member") -= 1;
             }
             debug_assert_eq!(indegree[&v], 0);
@@ -362,6 +577,7 @@ pub(crate) fn compile(
         report.loops.push(FeedbackLoop {
             modules: loop_modules,
             inserted_delays: inserted,
+            inserted_assignment_delays: inserted_assignments,
         });
         steps.push(StepSpec::Loop {
             modules: ordered,
@@ -369,7 +585,35 @@ pub(crate) fn compile(
         });
     }
 
-    // 5. One buffer per distinct default that an unconnected input reads.
+    // 5. One buffer per modulated parameter. Sources in assignment id order.
+    let mut groups: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
+    for (i, assignment) in compiled.iter().enumerate() {
+        if matches!(nodes[assignment.target_node].descriptor.role, ModuleRole::Dsp(_)) {
+            groups
+                .entry((assignment.target_node, assignment.param))
+                .or_default()
+                .push(i);
+        }
+    }
+    let mut fills_of: Vec<Vec<FillSpec>> = (0..n).map(|_| Vec::new()).collect();
+    for ((node, param), sources) in groups {
+        buffer_count += 1;
+        let buffer = buffer_count - 1;
+        let sources = sources
+            .into_iter()
+            .map(|i| {
+                let assignment = &compiled[i];
+                let buffer = delayed
+                    .get(&assignment.id)
+                    .copied()
+                    .unwrap_or_else(|| source_buffer(assignment.source));
+                SourceSpec { assignment: i, buffer }
+            })
+            .collect();
+        fills_of[node].push(FillSpec { param, buffer, sources });
+    }
+
+    // 6. One buffer per distinct default that an unconnected input reads.
     // Only DSP modules read their inputs through pointers.
     let default_of = |input: InputRef| nodes[index_of[&input.module]].descriptor.inputs[input.port].default;
     let mut default_buf: BTreeMap<DefaultKey, usize> = BTreeMap::new();
@@ -426,6 +670,8 @@ pub(crate) fn compile(
 
     let mut input_ptrs = Vec::new();
     let mut output_ptrs = Vec::new();
+    let mut param_ptrs = Vec::new();
+    let mut fills = Vec::new();
     let mut ops = Vec::new();
     let mut op_of_node = vec![u32::MAX; n];
     let mut make_op = |v: usize| -> u32 {
@@ -444,11 +690,45 @@ pub(crate) fn compile(
         }
         let out_start = output_ptrs.len() as u32;
         output_ptrs.extend(out_buf[v].iter().map(|&b| buf_ptrs[b]));
+        let fill_start = fills.len() as u32;
+        let param_start = param_ptrs.len() as u32;
+        for spec in &fills_of[v] {
+            let param_spec = &node.descriptor.params[spec.param];
+            let base = node.params.get(spec.param).copied().unwrap_or(param_spec.default);
+            let smooth = (param_spec.options.smooth_seconds > 0.0).then(|| {
+                Smoothed::new(
+                    param_spec.normalize(base),
+                    sample_rate,
+                    param_spec.options.smooth_seconds,
+                )
+            });
+            let sources = spec
+                .sources
+                .iter()
+                .map(|source| ModSource {
+                    state: source.assignment as u32,
+                    buffer: buf_ptrs[source.buffer] as *const f32,
+                })
+                .collect();
+            param_ptrs.push((spec.param as u16, buf_ptrs[spec.buffer] as *const f32));
+            fills.push(ParamFill {
+                key: (u64::from(ids[v].0) << 32) | (spec.param as u64),
+                slot: node.slot.expect("DSP modules have a slot") as u32,
+                param: spec.param as u16,
+                spec: param_spec,
+                base,
+                smooth,
+                buffer: buf_ptrs[spec.buffer],
+                sources,
+            });
+        }
         ops.push(ModuleOp {
             slot: node.slot.expect("DSP modules have a slot") as u32,
             inputs: (in_start, input_ptrs.len() as u32),
             outputs: (out_start, output_ptrs.len() as u32),
             connected,
+            fills: (fill_start, fills.len() as u32),
+            params: (param_start, param_ptrs.len() as u32),
         });
         op_of_node[v] = (ops.len() - 1) as u32;
         op_of_node[v]
@@ -546,6 +826,18 @@ pub(crate) fn compile(
         outputs,
         probes,
         transport,
+        fills,
+        assignments: compiled
+            .iter()
+            .map(|assignment| AssignmentRuntime {
+                id: assignment.id,
+                depth: assignment.depth,
+                enabled: assignment.enabled,
+                polarity: assignment.polarity,
+                source_polarity: assignment.source_polarity,
+            })
+            .collect(),
+        param_ptrs,
     };
     (schedule, report)
 }
@@ -627,6 +919,12 @@ mod tests {
             signal,
             description: "A test port.",
             default: crate::PortDefault::Value(0.0),
+            polarity: match signal {
+                crate::SignalType::Gate | crate::SignalType::Phase => crate::Polarity::Unipolar,
+                crate::SignalType::Audio | crate::SignalType::Pitch | crate::SignalType::Modulation => {
+                    crate::Polarity::Bipolar
+                }
+            },
         }
     }
 
@@ -685,7 +983,7 @@ mod tests {
 
     #[test]
     fn inputs_that_follow_the_same_default_share_one_buffer() {
-        let schedule = compile(&followers(100), &BTreeMap::new(), 64).0;
+        let schedule = compile(&followers(100), &BTreeMap::new(), 48_000.0, 64).0;
         // 100 outputs, one bar phase buffer, one buffer holding 0.5.
         assert_eq!(schedule._buffers.len(), 102);
         let bar = schedule.transport.bar_phase.expect("bar phase is used") as *const f32;
@@ -715,7 +1013,7 @@ mod tests {
             port: 0,
         };
         graph.cables.insert(to, from);
-        let schedule = compile(&graph, &BTreeMap::new(), 64).0;
+        let schedule = compile(&graph, &BTreeMap::new(), 48_000.0, 64).0;
         // Module 2 runs first; module 1 reads module 2's output.
         let source = schedule.output_ptrs[schedule.ops[0].outputs.0 as usize] as *const f32;
         assert_eq!(input_ptr(&schedule, 1, 0), source);

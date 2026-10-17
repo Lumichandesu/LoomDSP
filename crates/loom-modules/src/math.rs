@@ -4,8 +4,8 @@
 //! multiply), so a module is useful with only one cable.
 
 use loom_core::{
-    Module, ModuleConfig, ModuleDescriptor, ModuleRole, Panel, ParamOptions, ParamSpec, PortDefault, PortIo, PortSpec,
-    ProcessContext, SignalType, Widget,
+    Module, ModuleConfig, ModuleDescriptor, ModuleRole, Panel, ParamOptions, ParamSpec, Polarity, PortDefault, PortIo,
+    PortSpec, ProcessContext, SignalType, Widget,
 };
 use loom_rt::Smoothed;
 
@@ -23,6 +23,8 @@ pub static ADD: ModuleDescriptor = ModuleDescriptor {
             signal: SignalType::Modulation,
             description: "The first signal to add.",
             default: PortDefault::Value(0.0),
+
+            polarity: Polarity::Bipolar,
         },
         PortSpec {
             name: "b",
@@ -30,6 +32,8 @@ pub static ADD: ModuleDescriptor = ModuleDescriptor {
             signal: SignalType::Modulation,
             description: "The second signal to add.",
             default: PortDefault::Value(0.0),
+
+            polarity: Polarity::Bipolar,
         },
     ],
     outputs: &[PortSpec {
@@ -38,6 +42,7 @@ pub static ADD: ModuleDescriptor = ModuleDescriptor {
         signal: SignalType::Modulation,
         description: "A plus B plus the offset.",
         default: PortDefault::Value(0.0),
+        polarity: Polarity::Bipolar,
     }],
     params: &[ParamSpec {
         name: "offset",
@@ -48,10 +53,11 @@ pub static ADD: ModuleDescriptor = ModuleDescriptor {
         default: 0.0,
         unit: "",
         options: ParamOptions::DEFAULT,
-    }],
+    }
+    .smooth(0.005)],
     role: ModuleRole::Dsp(|config| {
         Box::new(Add {
-            offset: Smoothed::new(0.0, config.sample_rate, 0.005),
+            offset: Smoothed::new(0.0, config.sample_rate, ADD.params[0].options.smooth_seconds),
         })
     }),
     panel: Panel::new(3, 3, &[Widget::knob(0, 0, "offset")]),
@@ -64,9 +70,16 @@ struct Add {
 
 impl Module for Add {
     fn process(&mut self, _ctx: &ProcessContext<'_>, io: &mut PortIo<'_>) {
+        let modulated = io.modulated(0);
         let ([a, b], [out]) = io.split::<2, 1>();
-        for ((out, &a), &b) in out.iter_mut().zip(a).zip(b) {
-            *out = a + b + self.offset.tick();
+        for (i, ((out, &a), &b)) in out.iter_mut().zip(a).zip(b).enumerate() {
+            let offset = if let Some(samples) = modulated {
+                let _ = self.offset.tick();
+                samples[i]
+            } else {
+                self.offset.tick()
+            };
+            *out = a + b + offset;
         }
     }
 
@@ -91,6 +104,8 @@ pub static MUL: ModuleDescriptor = ModuleDescriptor {
             signal: SignalType::Audio,
             description: "The signal to scale.",
             default: PortDefault::Value(0.0),
+
+            polarity: Polarity::Bipolar,
         },
         PortSpec {
             name: "b",
@@ -98,6 +113,8 @@ pub static MUL: ModuleDescriptor = ModuleDescriptor {
             signal: SignalType::Modulation,
             description: "Scales A. Reads 1 while no cable is connected.",
             default: PortDefault::Value(0.0),
+
+            polarity: Polarity::Bipolar,
         },
     ],
     outputs: &[PortSpec {
@@ -106,6 +123,7 @@ pub static MUL: ModuleDescriptor = ModuleDescriptor {
         signal: SignalType::Audio,
         description: "A times B times the gain.",
         default: PortDefault::Value(0.0),
+        polarity: Polarity::Bipolar,
     }],
     params: &[ParamSpec {
         name: "gain",
@@ -116,10 +134,11 @@ pub static MUL: ModuleDescriptor = ModuleDescriptor {
         default: 1.0,
         unit: "",
         options: ParamOptions::DEFAULT,
-    }],
+    }
+    .smooth(0.005)],
     role: ModuleRole::Dsp(|config| {
         Box::new(Mul {
-            gain: Smoothed::new(1.0, config.sample_rate, 0.005),
+            gain: Smoothed::new(1.0, config.sample_rate, MUL.params[0].options.smooth_seconds),
         })
     }),
     panel: Panel::new(3, 3, &[Widget::knob(0, 0, "gain")]),
@@ -133,10 +152,17 @@ struct Mul {
 impl Module for Mul {
     fn process(&mut self, _ctx: &ProcessContext<'_>, io: &mut PortIo<'_>) {
         let b_connected = io.is_connected(1);
+        let modulated = io.modulated(0);
         let ([a, b], [out]) = io.split::<2, 1>();
-        for ((out, &a), &b) in out.iter_mut().zip(a).zip(b) {
+        for (i, ((out, &a), &b)) in out.iter_mut().zip(a).zip(b).enumerate() {
             let b = if b_connected { b } else { 1.0 };
-            *out = a * b * self.gain.tick();
+            let gain = if let Some(samples) = modulated {
+                let _ = self.gain.tick();
+                samples[i]
+            } else {
+                self.gain.tick()
+            };
+            *out = a * b * gain;
         }
     }
 
@@ -161,6 +187,7 @@ pub static CONSTANT: ModuleDescriptor = ModuleDescriptor {
         signal: SignalType::Modulation,
         description: "The value set by the parameter.",
         default: PortDefault::Value(0.0),
+        polarity: Polarity::Bipolar,
     }],
     params: &[ParamSpec {
         name: "value",
@@ -171,10 +198,11 @@ pub static CONSTANT: ModuleDescriptor = ModuleDescriptor {
         default: 0.0,
         unit: "",
         options: ParamOptions::DEFAULT,
-    }],
+    }
+    .smooth(0.005)],
     role: ModuleRole::Dsp(|config: &ModuleConfig| {
         Box::new(Constant {
-            value: Smoothed::new(0.0, config.sample_rate, 0.005),
+            value: Smoothed::new(0.0, config.sample_rate, CONSTANT.params[0].options.smooth_seconds),
         })
     }),
     panel: Panel::new(3, 3, &[Widget::knob(0, 0, "value")]),
@@ -187,9 +215,15 @@ struct Constant {
 
 impl Module for Constant {
     fn process(&mut self, _ctx: &ProcessContext<'_>, io: &mut PortIo<'_>) {
+        let modulated = io.modulated(0);
         let ([], [out]) = io.split::<0, 1>();
-        for out in out.iter_mut() {
-            *out = self.value.tick();
+        for (i, out) in out.iter_mut().enumerate() {
+            *out = if let Some(samples) = modulated {
+                let _ = self.value.tick();
+                samples[i]
+            } else {
+                self.value.tick()
+            };
         }
     }
 

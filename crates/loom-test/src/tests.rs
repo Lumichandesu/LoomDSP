@@ -1,5 +1,5 @@
 use super::*;
-use loom_core::{Module, ParamOptions, ParamSpec, PortIo, PortSpec, ProcessContext, SignalType};
+use loom_core::{Module, ParamOptions, ParamSpec, Polarity, PortIo, PortSpec, ProcessContext, SignalType};
 use std::path::PathBuf;
 
 /// A port for test descriptors.
@@ -10,6 +10,10 @@ const fn port(name: &'static str, signal: SignalType) -> PortSpec {
         signal,
         description: "A test port.",
         default: PortDefault::Value(0.0),
+        polarity: match signal {
+            SignalType::Gate | SignalType::Phase => Polarity::Unipolar,
+            SignalType::Audio | SignalType::Pitch | SignalType::Modulation => Polarity::Bipolar,
+        },
     }
 }
 
@@ -385,6 +389,8 @@ static UNDOCUMENTED: ModuleDescriptor = ModuleDescriptor {
         signal: SignalType::Audio,
         description: "",
         default: PortDefault::Value(0.0),
+
+        polarity: Polarity::Bipolar,
     }],
     outputs: &[port("out", SignalType::Audio)],
     params: &[ParamSpec {

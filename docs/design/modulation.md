@@ -3,7 +3,7 @@
 How any output modulates any parameter without a cable, and how users make, see, and edit those assignments.
 
 - **Kind:** living specification.
-- **Status:** Draft. Review it before building. The P1 slice becomes Agreed first. [Parameter mapping](#parameter-mapping) is Agreed.
+- **Status:** Draft for making, seeing, and editing assignments ([#70](https://github.com/brylie/LoomDSP/issues/70), [#71](https://github.com/brylie/LoomDSP/issues/71)). The [engine rules](#rules), [engine and API](#engine-and-api), and [engine acceptance criteria](#acceptance-criteria-engine) are Agreed ([#19](https://github.com/brylie/LoomDSP/issues/19)). [Parameter mapping](#parameter-mapping) is Agreed.
 - **Decision behind it:** [ADR-0014](../adr/0014-modulation-without-cables.md) (modulation without cables). Builds on [ADR-0013](../adr/0013-modules-carry-their-own-panel.md) (panels) and [ADR-0007](../adr/0007-polymorphic-signal-model.md) (signals).
 - **Requirements:** FR-MOD-01 to FR-MOD-08, FR-LIB-12.
 - **Issues:** [#19](https://github.com/brylie/LoomDSP/issues/19) (built-in modulation), [#20](https://github.com/brylie/LoomDSP/issues/20) (modulation range on controls), [#66](https://github.com/brylie/LoomDSP/issues/66) (parameter mapping).
@@ -66,10 +66,10 @@ A panel beside the inspector. Columns: on, source (module and output), target (m
 
    The arc follows the value used: a unipolar assignment draws from the base to `base + depth`, a bipolar one from `base - depth` to `base + depth`. Sources are never clamped; only the final parameter value is (rule 5). *Why:* an envelope should push a cutoff up from its base, an LFO should swing around it. A fixed, simple remap keeps the arc honest.
 5. **Sum, then clamp.** Several assignments on one parameter add up before the clamp (FR-MOD-03). Whole-number parameters are rounded after the clamp. *Why:* predictable, and the clamp keeps filters stable.
-6. **Per sample, only where needed.** A parameter with assignments, or one that is being smoothed, gets a per-sample buffer. Others stay one value per block. *Why:* modulation must be smooth at audio rate (FR-MOD-03), but most parameters are still most of the time.
-7. **Smoothing applies to the base value only.** Changes from the UI and MIDI are smoothed (FR-MOD-05). The modulation itself is not. *Why:* a sharp envelope or audio-rate source must stay sharp. Smoothing it would change the sound.
-8. **Assignments are graph edges.** The compiler orders the source before the target, and treats a loop through an assignment like any feedback loop: it inserts a one-sample delay where needed (ADR-0002). *Why:* the engine has one way to schedule, and feedback through modulation is a valid patch.
-9. **Depth 0 sounds the same as no assignment.** Output is bit-identical. *Why:* users set depth to 0 to compare, and expect silence from it.
+6. **Per sample, only where needed.** A parameter with at least one assignment gets a per-sample buffer. Others stay one value per block. *Why:* modulation must be smooth at audio rate (FR-MOD-03), but most parameters are still most of the time.
+7. **Smoothing applies to the base value only.** When a parameter has assignments and its `ParamSpec` sets a smooth time, the engine smooths the base in the control's 0 to 1 position, then adds the modulation unsmoothed (FR-MOD-05). The module reads that buffer and does not smooth it again. A parameter with no assignments keeps the smoothing it already had inside the module, so a knob that is not modulated sounds the same as before. The time lives on `ParamOptions`, set with `ParamSpec::smooth`. Built-in times: the filter cutoff and resonance are 10 ms; the add offset, multiply gain, and constant value are 5 ms. Every other parameter is unsmoothed. *Why:* a sharp envelope or audio-rate source must stay sharp. Smoothing it would change the sound. Keeping the old path for unmodulated knobs means existing patches do not change.
+8. **Assignments are graph edges.** The compiler orders the source before the target, and treats a loop through an assignment like any feedback loop: it inserts a one-sample delay where needed (ADR-0002). When a cycle must be broken, it delays the assignment before it delays a cable, so a modulation loop does not slip the audio path. A module assigned to its own parameter is a self-loop and runs one sample at a time. *Why:* the engine has one way to schedule, and feedback through modulation is a valid patch.
+9. **Depth 0 adds nothing.** On a patch where the assignment does not insert a delay on a cable, the output is bit-identical to the same patch without that assignment. *Why:* users set depth to 0 to compare, and expect silence from it.
 10. **Assignments stay inside their patch level.** Source and target must be in the same patch or sub-patch. To reach inside a sub-patch, expose the parameter (FR-ENCAP-03). *Why:* a sub-patch must work the same wherever it is used.
 11. **Assignments are part of the patch.** They are saved, undone, copied with their modules (when both ends are copied), and exported. *Why:* they change the sound.
 12. **Inputs and assignments add up, in a fixed order.** Some modules have an input for the same quantity as a parameter, such as the filter's cutoff input for keyboard tracking. The order is:
@@ -114,16 +114,21 @@ Every parameter maps between its value and its control's position, from 0 to 1. 
 
 ## Engine and API
 
-- The graph holds a list of assignments: source `OutputRef`, target module and parameter index, depth, polarity, enabled.
+**Status:** Agreed ([#19](https://github.com/brylie/LoomDSP/issues/19)).
+
+- The graph holds a list of assignments: source `OutputRef`, target module and parameter index, depth (-1 to 1), optional polarity override, enabled. Each assignment has a stable id. Several assignments on one parameter are applied in id order.
+- Each output declares a polarity on its `PortSpec`. Gate and phase default to unipolar. Audio, pitch, and modulation default to bipolar. An envelope output and a MIDI velocity output are unipolar. The engine remaps a source sample only when the assignment overrides that declaration (rule 4).
 - The compiler gives each modulated parameter a buffer of `max_block` samples, allocated with the schedule. No allocation on the audio thread.
-- Before a target module runs, the engine fills its modulated parameter buffers from the base value (smoothed) and the source buffers.
-- Modules read parameters through `PortIo`, as either a constant for the block or a per-sample slice. A helper gives the value at a frame index for code that does not care which.
-- Patch format (RON):
+- Before a target module runs, the engine fills its modulated parameter buffers from the base value (smoothed in control space when the parameter has a smooth time) and the source buffers. Inside a feedback loop the fill is one frame; otherwise it is the whole block. A delayed assignment reads the one-sample tap, not the live output.
+- Modules read a modulated parameter through `PortIo` as a per-sample slice. `PortIo::param_at` gives the value at a frame. A parameter with no assignments stays the value from `set_param`, one per block.
+- Adding or removing an assignment recompiles the graph. Changing depth, polarity, or enabled takes effect at the next buffer, like a parameter change, and does not allocate on the audio thread.
+- Deleting a module removes the assignments it is part of.
+- Patch format (RON), using the same `(module id, port or parameter name)` pairs as cables. Old files omit `modulation` and still load. `polarity` is omitted when the assignment follows the source. `enabled: false` is written only when the assignment is off. There is no format version bump.
 
 ```ron
 modulation: [
-    (source: "lfo1.out", target: "filter1.cutoff", depth: 0.25),
-    (source: "env1.out", target: "filter1.cutoff", depth: 0.4, polarity: Unipolar),
+    (source: (1, "out"), target: (2, "cutoff"), depth: 0.25),
+    (source: (3, "out"), target: (2, "cutoff"), depth: 0.4, polarity: Unipolar),
 ]
 ```
 
@@ -133,21 +138,29 @@ A **Macro** module (FR-LIB-12) has one knob on its panel and one output equal to
 
 ## P1 slice
 
-### Acceptance criteria
+### Acceptance criteria: engine
 
-- [ ] A constant source of 1.0 with depth 0.5 on a linear parameter with base 0 gives the middle of the range.
-- [ ] Depth 0.1 on cutoff (20 Hz to 20 kHz, logarithmic) moves it by a tenth of the knob, about one octave.
-- [ ] Two assignments sum before the clamp. The result never leaves the parameter range. Whole-number parameters stay whole.
-- [ ] Depth 0 output is bit-identical to no assignment.
-- [ ] Output is the same at any block size, with assignments present.
-- [ ] Adding and removing assignments during playback allocates nothing on the audio thread (`no_alloc` test).
-- [ ] A loop through an assignment gets a one-sample delay and plays.
+**Status:** Agreed ([#19](https://github.com/brylie/LoomDSP/issues/19)).
+
+- [x] A constant source of 1.0 with depth 0.5 on a linear parameter with base 0 gives the middle of the range.
+- [x] Depth 0.1 on cutoff (20 Hz to 20 kHz, logarithmic) moves it by a tenth of the knob, about one octave.
+- [x] Two assignments sum before the clamp. The result never leaves the parameter range. Whole-number parameters stay whole.
+- [x] Depth 0 output is bit-identical to no assignment, on a patch where the assignment does not delay a cable.
+- [x] Output is the same at any block size, with assignments present.
+- [x] Adding and removing assignments during playback allocates nothing on the audio thread (`no_alloc` test).
+- [x] A loop through an assignment gets a one-sample delay and plays.
+- [x] Assignments survive save and load. A patch saved before modulation still loads.
+- [x] Deleting a source or target module removes its assignments.
+
+### Acceptance criteria: editing and display
+
+**Status:** Draft. UI issues [#70](https://github.com/brylie/LoomDSP/issues/70) and [#71](https://github.com/brylie/LoomDSP/issues/71).
+
 - [ ] Dragging an output onto a control creates an assignment. Undo removes it.
 - [ ] Modulated controls show base, range arc, and live value.
 - [ ] Hovering a modulated control draws its source lines. The source port shows a badge.
 - [ ] The matrix lists every assignment, and depth can be edited by keyboard.
-- [ ] Assignments survive save and load.
-- [ ] Deleting a source module removes its assignments. Undo restores them.
+- [ ] Undo restores assignments removed by deleting a module.
 
 ### Out of scope for P1
 

@@ -225,8 +225,17 @@ fn check(path: &Path) -> Result<ExitCode> {
             i + 1,
             names.join(", ")
         );
-        if feedback.inserted_delays.is_empty() {
+        if feedback.inserted_delays.is_empty() && feedback.inserted_assignment_delays.is_empty() {
             println!("    broken by your 1-sample delay module(s)");
+        }
+        for id in &feedback.inserted_assignment_delays {
+            if let Some(assignment) = c.graph().assignment(*id) {
+                println!(
+                    "    inserted a 1-sample delay on modulation: {} -> {}",
+                    describe(c, assignment.source.module),
+                    describe(c, assignment.target)
+                );
+            }
         }
         for (from, to) in &feedback.inserted_delays {
             let graph = c.graph();

@@ -2,8 +2,8 @@
 
 use loom_core::signal::pitch;
 use loom_core::{
-    MidiMessage, Module, ModuleDescriptor, ModuleRole, Panel, ParamOptions, ParamSpec, PortDefault, PortIo, PortSpec,
-    ProcessContext, SignalType, Widget,
+    MidiMessage, Module, ModuleDescriptor, ModuleRole, Panel, ParamOptions, ParamSpec, Polarity, PortDefault, PortIo,
+    PortSpec, ProcessContext, SignalType, Widget,
 };
 
 /// `loom.midi.note`: monophonic MIDI note input with last-note priority.
@@ -21,6 +21,7 @@ pub static NOTE_IN: ModuleDescriptor = ModuleDescriptor {
             signal: SignalType::Pitch,
             description: "Pitch of the last note held, with pitch bend. 0 is middle C.",
             default: PortDefault::Value(0.0),
+            polarity: Polarity::Bipolar,
         },
         PortSpec {
             name: "gate",
@@ -28,6 +29,7 @@ pub static NOTE_IN: ModuleDescriptor = ModuleDescriptor {
             signal: SignalType::Gate,
             description: "High while any note is held.",
             default: PortDefault::Value(0.0),
+            polarity: Polarity::Unipolar,
         },
         PortSpec {
             name: "velocity",
@@ -35,6 +37,7 @@ pub static NOTE_IN: ModuleDescriptor = ModuleDescriptor {
             signal: SignalType::Modulation,
             description: "How hard the last note was played, from 0 to 1.",
             default: PortDefault::Value(0.0),
+            polarity: Polarity::Unipolar,
         },
     ],
     params: &[
@@ -127,9 +130,17 @@ impl NoteIn {
 
 impl Module for NoteIn {
     fn process(&mut self, ctx: &ProcessContext<'_>, io: &mut PortIo<'_>) {
+        let channel = io.modulated(0);
+        let bend_range = io.modulated(1);
         let ([], [pitch_out, gate_out, velocity_out]) = io.split::<0, 3>();
         let mut events = ctx.midi().peekable();
         for i in 0..pitch_out.len() {
+            if let Some(samples) = channel {
+                self.channel = samples[i].round() as u8;
+            }
+            if let Some(samples) = bend_range {
+                self.bend_range = samples[i];
+            }
             while let Some((frame, event)) = events.peek() {
                 if *frame > i {
                     break;

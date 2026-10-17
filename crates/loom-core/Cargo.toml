@@ -12,6 +12,7 @@ keywords = ["audio", "dsp", "modular", "synthesizer", "realtime"]
 categories = ["multimedia::audio"]
 
 [dependencies]
+loom-rt.workspace = true
 rtrb.workspace = true
 thiserror.workspace = true
 

@@ -174,6 +174,12 @@ mod tests {
             signal,
             description: "A test port.",
             default: crate::PortDefault::Value(0.0),
+            polarity: match signal {
+                crate::SignalType::Gate | crate::SignalType::Phase => crate::Polarity::Unipolar,
+                crate::SignalType::Audio | crate::SignalType::Pitch | crate::SignalType::Modulation => {
+                    crate::Polarity::Bipolar
+                }
+            },
         }
     }
 
@@ -238,6 +244,8 @@ mod tests {
                 signal: crate::SignalType::Audio,
                 description: "",
                 default: PortDefault::Value(0.0),
+
+                polarity: crate::Polarity::Bipolar,
             }],
             outputs: &[port("out", crate::SignalType::Audio)],
             params: &[],

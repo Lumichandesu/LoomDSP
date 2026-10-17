@@ -1,4 +1,4 @@
-use crate::graph::ModuleId;
+use crate::graph::{AssignmentId, ModuleId};
 use crate::telemetry::ProbeId;
 use crate::transport::TimeSignature;
 
@@ -43,6 +43,9 @@ pub enum LoomError {
         /// The port name or index.
         port: String,
     },
+    /// No modulation assignment with this id.
+    #[error("no modulation assignment {0}")]
+    UnknownAssignment(AssignmentId),
     /// A parameter name or index does not exist.
     #[error("module {module} has no parameter `{param}`")]
     NoSuchParam {

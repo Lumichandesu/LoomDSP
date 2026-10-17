@@ -6,8 +6,8 @@
 
 use loom_core::signal::{EdgeDetector, WrapDetector, pitch, trigger};
 use loom_core::{
-    Module, ModuleConfig, ModuleDescriptor, ModuleRole, Panel, ParamOptions, ParamSpec, PortDefault, PortIo, PortSpec,
-    ProcessContext, SignalType, Widget,
+    Module, ModuleConfig, ModuleDescriptor, ModuleRole, Panel, ParamOptions, ParamSpec, Polarity, PortDefault, PortIo,
+    PortSpec, ProcessContext, SignalType, Widget,
 };
 
 /// `loom.phase.generator`: a ramp from 0 to 1 at the frequency set by pitch.
@@ -24,6 +24,8 @@ pub static PHASE: ModuleDescriptor = ModuleDescriptor {
             signal: SignalType::Pitch,
             description: "Sets the frequency. 0 is middle C, and +0.1 is one octave up.",
             default: PortDefault::Value(0.0),
+
+            polarity: Polarity::Bipolar,
         },
         PortSpec {
             name: "reset",
@@ -31,6 +33,8 @@ pub static PHASE: ModuleDescriptor = ModuleDescriptor {
             signal: SignalType::Gate,
             description: "A rising edge sets the phase back to 0.",
             default: PortDefault::Value(0.0),
+
+            polarity: Polarity::Unipolar,
         },
     ],
     outputs: &[PortSpec {
@@ -39,6 +43,8 @@ pub static PHASE: ModuleDescriptor = ModuleDescriptor {
         signal: SignalType::Phase,
         description: "A ramp from 0 up to 1, once per cycle.",
         default: PortDefault::Value(0.0),
+
+        polarity: Polarity::Unipolar,
     }],
     params: &[
         ParamSpec {
@@ -109,9 +115,18 @@ fn increment(hz: f32, sample_rate: f64) -> f64 {
 
 impl Module for Phase {
     fn process(&mut self, _ctx: &ProcessContext<'_>, io: &mut PortIo<'_>) {
+        let tune_samples = io.modulated(0);
+        let octave_samples = io.modulated(1);
         let ([pitch_in, reset], [out]) = io.split::<2, 1>();
         let offset = self.tune * pitch::PER_SEMITONE + self.octave * pitch::PER_OCTAVE;
-        for ((out, &p), &r) in out.iter_mut().zip(pitch_in).zip(reset) {
+        for (i, ((out, &p), &r)) in out.iter_mut().zip(pitch_in).zip(reset).enumerate() {
+            let offset = if tune_samples.is_some() || octave_samples.is_some() {
+                let tune = tune_samples.map(|samples| samples[i]).unwrap_or(self.tune);
+                let octave = octave_samples.map(|samples| samples[i]).unwrap_or(self.octave);
+                tune * pitch::PER_SEMITONE + octave * pitch::PER_OCTAVE
+            } else {
+                offset
+            };
             if self.reset_in.rising(r) {
                 self.phase = 0.0;
             }
@@ -153,6 +168,8 @@ pub static PHASE_TRIGGER: ModuleDescriptor = ModuleDescriptor {
         signal: SignalType::Phase,
         description: "The phase to watch. Each wrap fires a trigger.",
         default: PortDefault::Value(0.0),
+
+        polarity: Polarity::Unipolar,
     }],
     outputs: &[PortSpec {
         name: "trigger",
@@ -160,6 +177,8 @@ pub static PHASE_TRIGGER: ModuleDescriptor = ModuleDescriptor {
         signal: SignalType::Gate,
         description: "Fires once each time the phase wraps.",
         default: PortDefault::Value(0.0),
+
+        polarity: Polarity::Unipolar,
     }],
     params: &[],
     role: ModuleRole::Dsp(|_| {

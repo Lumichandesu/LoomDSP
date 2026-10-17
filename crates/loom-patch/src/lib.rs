@@ -23,11 +23,12 @@
 //! ```
 //!
 //! Saved files are canonical: modules sorted by ID, cables sorted by input,
-//! parameters sorted by name. This keeps git diffs small.
+//! modulation sorted by target then source, parameters sorted by name.
+//! This keeps git diffs small.
 
 #![warn(missing_docs)]
 
-use loom_core::{Controller, Graph, InputRef, LoomError, ModuleId, OutputRef};
+use loom_core::{Controller, Graph, InputRef, LoomError, ModuleId, OutputRef, Polarity};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -53,6 +54,9 @@ pub struct Patch {
     /// Cables.
     #[serde(default)]
     pub cables: Vec<PatchCable>,
+    /// Modulation assignments. Omitted when empty, so older files still load.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modulation: Vec<PatchModulation>,
 }
 
 /// A module in a patch file.
@@ -80,6 +84,85 @@ pub struct PatchCable {
     pub from: (u32, String),
     /// Input side.
     pub to: (u32, String),
+}
+
+/// A modulation assignment in a patch file.
+///
+/// `source` is `(module id, output name)`. `target` is `(module id, parameter name)`.
+/// `polarity` is omitted when the assignment follows the source output.
+/// `enabled: false` is written only when the assignment is off.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PatchModulation {
+    /// Output that drives the parameter.
+    pub source: (u32, String),
+    /// Parameter that is moved.
+    pub target: (u32, String),
+    /// Share of the control's range, from -1 to 1.
+    pub depth: f32,
+    /// Forces a polarity. Absent means follow the source output.
+    /// Written as `Unipolar` or `Bipolar`, not as `Some(...)`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_polarity",
+        deserialize_with = "deserialize_polarity"
+    )]
+    pub polarity: Option<PatchPolarity>,
+    /// False skips the assignment. Missing means on.
+    #[serde(default = "enabled_by_default", skip_serializing_if = "is_enabled")]
+    pub enabled: bool,
+}
+
+/// Polarity stored in a patch file. Matches [`Polarity`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PatchPolarity {
+    /// Nominally 0 to 1.
+    Unipolar,
+    /// Nominally -1 to 1.
+    Bipolar,
+}
+
+fn enabled_by_default() -> bool {
+    true
+}
+
+fn is_enabled(enabled: &bool) -> bool {
+    *enabled
+}
+
+fn serialize_polarity<S>(value: &Option<PatchPolarity>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match value {
+        Some(polarity) => polarity.serialize(serializer),
+        None => serializer.serialize_none(),
+    }
+}
+
+fn deserialize_polarity<'de, D>(deserializer: D) -> Result<Option<PatchPolarity>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    PatchPolarity::deserialize(deserializer).map(Some)
+}
+
+impl From<Polarity> for PatchPolarity {
+    fn from(polarity: Polarity) -> Self {
+        match polarity {
+            Polarity::Unipolar => Self::Unipolar,
+            Polarity::Bipolar => Self::Bipolar,
+        }
+    }
+}
+
+impl From<PatchPolarity> for Polarity {
+    fn from(polarity: PatchPolarity) -> Self {
+        match polarity {
+            PatchPolarity::Unipolar => Self::Unipolar,
+            PatchPolarity::Bipolar => Self::Bipolar,
+        }
+    }
 }
 
 /// Patch loading and saving errors.
@@ -129,6 +212,7 @@ impl Patch {
             description: String::new(),
             modules: Vec::new(),
             cables: Vec::new(),
+            modulation: Vec::new(),
         }
     }
 
@@ -175,6 +259,14 @@ impl Patch {
     pub fn canonicalise(&mut self) {
         self.modules.sort_by_key(|m| m.id);
         self.cables.sort_by(|a, b| (a.to.0, &a.to.1).cmp(&(b.to.0, &b.to.1)));
+        self.modulation.sort_by(|a, b| {
+            (&a.target.0, &a.target.1, &a.source.0, &a.source.1).cmp(&(
+                &b.target.0,
+                &b.target.1,
+                &b.source.0,
+                &b.source.1,
+            ))
+        });
     }
 
     /// Upgrades an older patch to [`CURRENT_VERSION`].
@@ -217,6 +309,21 @@ impl Patch {
         for cable in &self.cables {
             controller.connect_named(ModuleId(cable.from.0), &cable.from.1, ModuleId(cable.to.0), &cable.to.1)?;
         }
+        for assignment in &self.modulation {
+            let id = controller.add_assignment_named(
+                ModuleId(assignment.source.0),
+                &assignment.source.1,
+                ModuleId(assignment.target.0),
+                &assignment.target.1,
+                assignment.depth,
+            )?;
+            if let Some(polarity) = assignment.polarity {
+                controller.set_assignment_polarity(id, Some(polarity.into()))?;
+            }
+            if !assignment.enabled {
+                controller.set_assignment_enabled(id, false)?;
+            }
+        }
         controller.commit()?;
         Ok(())
     }
@@ -247,6 +354,18 @@ impl Patch {
                 to: (to.module.0, input_name(graph, to)),
             });
         }
+        for (_, assignment) in graph.assignments() {
+            patch.modulation.push(PatchModulation {
+                source: (assignment.source.module.0, port_name(graph, assignment.source)),
+                target: (
+                    assignment.target.0,
+                    param_name(graph, assignment.target, assignment.param),
+                ),
+                depth: assignment.depth,
+                polarity: assignment.polarity.map(PatchPolarity::from),
+                enabled: assignment.enabled,
+            });
+        }
         patch.canonicalise();
         patch
     }
@@ -263,6 +382,14 @@ fn input_name(graph: &Graph, input: InputRef) -> String {
     graph
         .node(input.module)
         .map(|n| n.descriptor.inputs[input.port].name.to_string())
+        .unwrap_or_default()
+}
+
+fn param_name(graph: &Graph, module: ModuleId, index: usize) -> String {
+    graph
+        .node(module)
+        .and_then(|n| n.descriptor.params.get(index))
+        .map(|param| param.name.to_string())
         .unwrap_or_default()
 }
 
@@ -313,6 +440,52 @@ Patch(
             Patch::from_ron(&text),
             Err(PatchError::TooNew { found: 99, .. })
         ));
+    }
+
+    const MODULATED: &str = r#"
+Patch(
+    version: 1,
+    name: "Modulated",
+    modules: [
+        (id: 1, kind: "loom.math.constant@1", params: {"value": 1.0}),
+        (id: 2, kind: "loom.env.adsr@1"),
+        (id: 3, kind: "loom.filter.svf@1"),
+    ],
+    modulation: [
+        (source: (2, "out"), target: (3, "resonance"), depth: 0.4, polarity: Unipolar, enabled: false),
+        (source: (1, "out"), target: (3, "cutoff"), depth: 0.25),
+    ],
+)
+"#;
+
+    #[test]
+    fn modulation_round_trips_and_old_patches_load() {
+        let old = Patch::from_ron(SIMPLE).unwrap();
+        assert!(old.modulation.is_empty());
+        let mut parts = create_engine(loom_modules::registry(), EngineConfig::default());
+        old.load_into(&mut parts.controller).unwrap();
+        let saved = Patch::from_graph("Simple sine", parts.controller.graph());
+        assert!(saved.modulation.is_empty());
+        assert!(!saved.to_ron().unwrap().contains("modulation"));
+
+        let patch = Patch::from_ron(MODULATED).unwrap();
+        let mut parts = create_engine(loom_modules::registry(), EngineConfig::default());
+        patch.load_into(&mut parts.controller).unwrap();
+        let saved = Patch::from_graph("Modulated", parts.controller.graph());
+        let mut expected = patch.clone();
+        expected.canonicalise();
+        assert_eq!(saved, expected);
+        assert_eq!(saved.modulation[0].target.1, "cutoff");
+        assert!(saved.modulation[0].polarity.is_none());
+        assert!(saved.modulation[0].enabled);
+        assert_eq!(saved.modulation[1].polarity, Some(PatchPolarity::Unipolar));
+        assert!(!saved.modulation[1].enabled);
+
+        let text = saved.to_ron().unwrap();
+        assert!(text.contains("modulation:"));
+        assert!(text.contains("enabled: false"));
+        assert!(!text.contains("enabled: true"));
+        assert_eq!(Patch::from_ron(&text).unwrap().to_ron().unwrap(), text);
     }
 
     #[test]

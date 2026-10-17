@@ -1,6 +1,6 @@
 //! Modules the engine runs itself: the unit delay and the audio output.
 
-use loom_core::{ModuleDescriptor, ModuleRole, Panel, PortDefault, PortSpec, SignalType};
+use loom_core::{ModuleDescriptor, ModuleRole, Panel, Polarity, PortDefault, PortSpec, SignalType};
 
 /// `loom.time.delay1`: delays its input by exactly one sample.
 ///
@@ -18,6 +18,8 @@ pub static UNIT_DELAY: ModuleDescriptor = ModuleDescriptor {
         signal: SignalType::Audio,
         description: "The signal to delay.",
         default: PortDefault::Value(0.0),
+
+        polarity: Polarity::Bipolar,
     }],
     outputs: &[PortSpec {
         name: "out",
@@ -25,6 +27,8 @@ pub static UNIT_DELAY: ModuleDescriptor = ModuleDescriptor {
         signal: SignalType::Audio,
         description: "The input, one sample later.",
         default: PortDefault::Value(0.0),
+
+        polarity: Polarity::Bipolar,
     }],
     params: &[],
     role: ModuleRole::UnitDelay,
@@ -46,6 +50,8 @@ pub static AUDIO_OUT: ModuleDescriptor = ModuleDescriptor {
             signal: SignalType::Audio,
             description: "The left channel. Plays on both sides if Right has no cable.",
             default: PortDefault::Value(0.0),
+
+            polarity: Polarity::Bipolar,
         },
         PortSpec {
             name: "right",
@@ -53,6 +59,8 @@ pub static AUDIO_OUT: ModuleDescriptor = ModuleDescriptor {
             signal: SignalType::Audio,
             description: "The right channel. Plays on both sides if Left has no cable.",
             default: PortDefault::Value(0.0),
+
+            polarity: Polarity::Bipolar,
         },
     ],
     outputs: &[],

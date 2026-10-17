@@ -1,6 +1,6 @@
 //! The editable patch graph, owned by the control thread.
 
-use crate::descriptor::{ModuleDescriptor, ModuleRole};
+use crate::descriptor::{ModuleDescriptor, ModuleRole, Polarity};
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -32,6 +32,36 @@ pub struct InputRef {
     pub port: usize,
 }
 
+/// Stable identifier of one modulation assignment. Saved only for the
+/// session: patch files identify an assignment by its source and target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AssignmentId(pub u32);
+
+impl fmt::Display for AssignmentId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// One modulation assignment: an output moving a parameter, without a cable.
+///
+/// Spec: `docs/design/modulation.md`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Assignment {
+    /// The output that drives the parameter.
+    pub source: OutputRef,
+    /// The module whose parameter is moved.
+    pub target: ModuleId,
+    /// Parameter index on [`Self::target`].
+    pub param: usize,
+    /// Share of the control's full range, from -1 to 1.
+    pub depth: f32,
+    /// Forces a polarity. `None` follows the source output.
+    pub polarity: Option<Polarity>,
+    /// False skips this assignment without removing the scheduling edge.
+    pub enabled: bool,
+}
+
 /// A module in the graph.
 #[derive(Debug)]
 pub struct Node {
@@ -50,12 +80,15 @@ impl Node {
     }
 }
 
-/// Modules and cables. Each input has at most one cable.
+/// Modules, cables, and modulation assignments. Each input has at most one cable.
 #[derive(Debug, Default)]
 pub struct Graph {
     pub(crate) nodes: BTreeMap<ModuleId, Node>,
     /// Cables, keyed by the input they feed.
     pub(crate) cables: BTreeMap<InputRef, OutputRef>,
+    /// Modulation assignments, in id order. That order is the order their
+    /// depths are added.
+    pub(crate) assignments: BTreeMap<AssignmentId, Assignment>,
 }
 
 impl Graph {
@@ -77,6 +110,16 @@ impl Graph {
     /// The cable feeding an input, if any.
     pub fn source_of(&self, input: InputRef) -> Option<OutputRef> {
         self.cables.get(&input).copied()
+    }
+
+    /// All modulation assignments, sorted by id.
+    pub fn assignments(&self) -> impl Iterator<Item = (AssignmentId, &Assignment)> {
+        self.assignments.iter().map(|(id, assignment)| (*id, assignment))
+    }
+
+    /// One modulation assignment.
+    pub fn assignment(&self, id: AssignmentId) -> Option<&Assignment> {
+        self.assignments.get(&id)
     }
 
     /// Number of modules.

@@ -2,8 +2,8 @@
 
 use loom_core::signal::gate_is_high;
 use loom_core::{
-    Module, ModuleConfig, ModuleDescriptor, ModuleRole, Panel, ParamOptions, ParamSpec, PortDefault, PortIo, PortSpec,
-    ProcessContext, SignalType, Widget,
+    Module, ModuleConfig, ModuleDescriptor, ModuleRole, Panel, ParamOptions, ParamSpec, Polarity, PortDefault, PortIo,
+    PortSpec, ProcessContext, SignalType, Widget,
 };
 
 /// `loom.env.adsr`: attack, decay, sustain, release envelope.
@@ -19,6 +19,7 @@ pub static ADSR: ModuleDescriptor = ModuleDescriptor {
         signal: SignalType::Gate,
         description: "Going high starts the envelope. Going low releases it.",
         default: PortDefault::Value(0.0),
+        polarity: Polarity::Unipolar,
     }],
     outputs: &[PortSpec {
         name: "out",
@@ -26,6 +27,7 @@ pub static ADSR: ModuleDescriptor = ModuleDescriptor {
         signal: SignalType::Modulation,
         description: "The envelope level, from 0 to 1.",
         default: PortDefault::Value(0.0),
+        polarity: Polarity::Unipolar,
     }],
     params: &[
         ParamSpec {
@@ -129,8 +131,26 @@ impl Adsr {
 
 impl Module for Adsr {
     fn process(&mut self, _ctx: &ProcessContext<'_>, io: &mut PortIo<'_>) {
+        let attack = io.modulated(0);
+        let decay = io.modulated(1);
+        let sustain = io.modulated(2);
+        let release = io.modulated(3);
         let ([gate], [out]) = io.split::<1, 1>();
-        for (out, &g) in out.iter_mut().zip(gate) {
+        for (i, (out, &g)) in out.iter_mut().zip(gate).enumerate() {
+            if attack.is_some() || decay.is_some() || sustain.is_some() || release.is_some() {
+                if let Some(samples) = attack {
+                    self.attack_step = 1.0 / (samples[i] * self.sample_rate).max(1.0);
+                }
+                if let Some(samples) = decay {
+                    self.decay_coefficient = exp_coefficient(samples[i], self.sample_rate);
+                }
+                if let Some(samples) = sustain {
+                    self.sustain = samples[i];
+                }
+                if let Some(samples) = release {
+                    self.release_coefficient = exp_coefficient(samples[i], self.sample_rate);
+                }
+            }
             let high = gate_is_high(g);
             if high && !self.gate_was_high {
                 // Start from the current level: no click on retrigger.

@@ -3,13 +3,44 @@
 use crate::module::Module;
 use crate::signal::SignalType;
 
+/// Whether an output swings around zero or sits above it.
+///
+/// Modulation uses this to decide how a source moves a control (ADR-0014).
+/// Gate and phase outputs are unipolar. Audio, pitch, and modulation outputs
+/// are bipolar unless the module says otherwise. An envelope is unipolar even
+/// though its signal type is modulation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Polarity {
+    /// Nominally 0 to 1, such as an envelope or a gate.
+    Unipolar,
+    /// Nominally -1 to 1, such as an LFO or an oscillator.
+    Bipolar,
+}
+
+impl Polarity {
+    /// Remaps `sample` from the polarity the output declares to this one.
+    ///
+    /// The same polarity returns `sample` unchanged. A bipolar source forced
+    /// unipolar becomes `(sample + 1) / 2`. A unipolar source forced bipolar
+    /// becomes `2 * sample - 1`. The sample is not clamped.
+    pub fn remap(self, declared: Self, sample: f32) -> f32 {
+        if self == declared {
+            return sample;
+        }
+        match self {
+            Self::Unipolar => (sample + 1.0) / 2.0,
+            Self::Bipolar => sample * 2.0 - 1.0,
+        }
+    }
+}
+
 /// One input or output port.
 ///
 /// Write it as a struct literal, so every field is named and a missing one
 /// is a compile error:
 ///
 /// ```
-/// use loom_core::{PortDefault, PortSpec, SignalType};
+/// use loom_core::{Polarity, PortDefault, PortSpec, SignalType};
 ///
 /// const RESET: PortSpec = PortSpec {
 ///     name: "reset",
@@ -17,6 +48,7 @@ use crate::signal::SignalType;
 ///     signal: SignalType::Gate,
 ///     description: "Starts the count again.",
 ///     default: PortDefault::Value(0.0),
+///     polarity: Polarity::Unipolar,
 /// };
 /// ```
 ///
@@ -37,12 +69,22 @@ pub struct PortSpec {
     /// What an input reads while no cable is connected. Ignored on outputs;
     /// write `PortDefault::Value(0.0)` there.
     pub default: PortDefault,
+    /// How an output moves a modulated control. Ignored on inputs.
+    /// Gate and phase default to unipolar. Audio, pitch, and modulation
+    /// default to bipolar.
+    pub polarity: Polarity,
 }
 
 impl PortSpec {
     /// Sets what the input reads while no cable is connected.
     pub const fn with_default(mut self, default: PortDefault) -> Self {
         self.default = default;
+        self
+    }
+
+    /// Sets the polarity an output declares for modulation.
+    pub const fn with_polarity(mut self, polarity: Polarity) -> Self {
+        self.polarity = polarity;
         self
     }
 }
@@ -117,7 +159,7 @@ pub struct ParamSpec {
 /// new option later breaks no module. `ParamSpec` as a whole has no default,
 /// because its label and description must always be written. A constant,
 /// not `Default::default()`, because descriptors are `static`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub struct ParamOptions {
     /// True for whole-number parameters, such as a MIDI channel or a seed.
@@ -125,6 +167,11 @@ pub struct ParamOptions {
     pub integer: bool,
     /// How the value maps to its control's position.
     pub mapping: ParamMapping,
+    /// Seconds the engine spends smoothing this parameter's base while it
+    /// is modulated. Zero means the base steps immediately. The glide is in
+    /// the control's 0 to 1 position, and the modulation added on top is not
+    /// smoothed. Spec: `docs/design/modulation.md`, rule 7.
+    pub smooth_seconds: f32,
 }
 
 impl ParamOptions {
@@ -132,6 +179,7 @@ impl ParamOptions {
     pub const DEFAULT: Self = Self {
         integer: false,
         mapping: ParamMapping::Linear,
+        smooth_seconds: 0.0,
     };
 }
 
@@ -169,6 +217,14 @@ impl ParamSpec {
     /// Maps the parameter logarithmically, for frequencies and times.
     pub const fn logarithmic(mut self) -> Self {
         self.options.mapping = ParamMapping::Logarithmic;
+        self
+    }
+
+    /// Smooths the base value over about `seconds` while the parameter is
+    /// modulated. The time is the same one-pole glide modules already use
+    /// for an unmodulated knob.
+    pub const fn smooth(mut self, seconds: f32) -> Self {
+        self.options.smooth_seconds = seconds;
         self
     }
 
@@ -748,6 +804,17 @@ mod tests {
     }
 
     #[test]
+    fn polarity_remap_follows_the_override() {
+        assert_eq!(Polarity::Bipolar.remap(Polarity::Bipolar, -0.4), -0.4);
+        assert_eq!(Polarity::Unipolar.remap(Polarity::Bipolar, -1.0), 0.0);
+        assert_eq!(Polarity::Unipolar.remap(Polarity::Bipolar, 1.0), 1.0);
+        assert_eq!(Polarity::Bipolar.remap(Polarity::Unipolar, 0.0), -1.0);
+        assert_eq!(Polarity::Bipolar.remap(Polarity::Unipolar, 1.0), 1.0);
+        // A source past the nominal range is kept. Only the parameter is clamped.
+        assert_eq!(Polarity::Bipolar.remap(Polarity::Bipolar, 3.0), 3.0);
+    }
+
+    #[test]
     fn results_are_always_valid() {
         for spec in [CUTOFF, GAIN, SEED] {
             assert_eq!(spec.normalize(spec.max * 10.0), 1.0);
@@ -788,6 +855,8 @@ mod tests {
             signal: SignalType::Audio,
             description: "",
             default: PortDefault::Value(0.0),
+
+            polarity: Polarity::Bipolar,
         }],
         outputs: &[PortSpec {
             name: "out",
@@ -795,6 +864,8 @@ mod tests {
             signal: SignalType::Audio,
             description: "The input.",
             default: PortDefault::Value(0.0),
+
+            polarity: Polarity::Bipolar,
         }],
         params: &[ParamSpec {
             label: "",

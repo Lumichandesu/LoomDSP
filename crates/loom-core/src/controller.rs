@@ -1,11 +1,11 @@
 //! The control-thread side of the engine.
 
 use crate::compile::{CompileReport, compile};
-use crate::descriptor::{ModuleConfig, ModuleDescriptor, ModuleRole};
+use crate::descriptor::{ModuleConfig, ModuleDescriptor, ModuleRole, Polarity};
 use crate::display::{DisplayReader, DisplaySource, DisplayTable};
 use crate::engine::{Command, Engine, EngineConfig, EngineStats, Garbage};
 use crate::error::LoomError;
-use crate::graph::{Graph, InputRef, ModuleId, Node, OutputRef};
+use crate::graph::{Assignment, AssignmentId, Graph, InputRef, ModuleId, Node, OutputRef};
 use crate::midi::MidiEvent;
 use crate::registry::Registry;
 use crate::telemetry::{ProbeId, ProbeKind, Telemetry, TelemetrySender};
@@ -60,6 +60,7 @@ pub fn create_engine(registry: Arc<Registry>, config: EngineConfig) -> EnginePar
         probes: BTreeMap::new(),
         next_probe: 1,
         next_id: 1,
+        next_assignment: 1,
         dirty: false,
         last_report: CompileReport::default(),
         transport: TransportSettings::default(),
@@ -89,9 +90,11 @@ impl MidiSender {
 
 /// Edits the graph and keeps the engine in sync.
 ///
-/// Structural edits (add, remove, connect, disconnect) take effect when you
-/// call [`Controller::commit`]. Batch several edits, then commit once.
-/// Parameter changes take effect immediately.
+/// Structural edits (add, remove, connect, disconnect, add or remove a
+/// modulation assignment) take effect when you call [`Controller::commit`].
+/// Batch several edits, then commit once. Parameter changes, and changes to
+/// an assignment's depth, polarity, or enabled flag, take effect at the next
+/// buffer without a recompile.
 pub struct Controller {
     registry: Arc<Registry>,
     graph: Graph,
@@ -102,6 +105,7 @@ pub struct Controller {
     probes: BTreeMap<ProbeId, (OutputRef, ProbeKind)>,
     next_probe: u32,
     next_id: u32,
+    next_assignment: u32,
     dirty: bool,
     last_report: CompileReport,
     /// What the engine's transport is set to, as of the last command sent.
@@ -204,12 +208,16 @@ impl Controller {
         Ok(())
     }
 
-    /// Removes a module, every cable touching it, and every probe on it.
+    /// Removes a module, every cable touching it, every modulation assignment
+    /// it is part of, and every probe on it.
     pub fn remove_module(&mut self, id: ModuleId) -> Result<(), LoomError> {
         let node = self.graph.nodes.remove(&id).ok_or(LoomError::UnknownModule(id))?;
         self.graph
             .cables
             .retain(|to, from| to.module != id && from.module != id);
+        self.graph
+            .assignments
+            .retain(|_, assignment| assignment.source.module != id && assignment.target != id);
         self.probes.retain(|_, (from, _)| from.module != id);
         if let Some(slot) = node.slot {
             // The running schedule still uses this slot. The instance is
@@ -240,6 +248,102 @@ impl Controller {
         let from = self.output_ref(from, output)?;
         let to = self.input_ref(to, input)?;
         self.connect(from, to)
+    }
+
+    /// Assigns an output to a parameter. Depth is clamped to -1..1.
+    /// Takes effect on the next [`Controller::commit`].
+    ///
+    /// The new assignment follows the source output's polarity and starts
+    /// enabled, with the given depth.
+    pub fn add_assignment(
+        &mut self,
+        source: OutputRef,
+        target: ModuleId,
+        param: usize,
+        depth: f32,
+    ) -> Result<AssignmentId, LoomError> {
+        self.check_output(source)?;
+        self.check_param(target, param)?;
+        let id = AssignmentId(self.next_assignment);
+        self.next_assignment += 1;
+        self.graph.assignments.insert(
+            id,
+            Assignment {
+                source,
+                target,
+                param,
+                depth: clamp_depth(depth),
+                polarity: None,
+                enabled: true,
+            },
+        );
+        self.dirty = true;
+        Ok(id)
+    }
+
+    /// Assigns an output to a parameter, both named.
+    pub fn add_assignment_named(
+        &mut self,
+        source: ModuleId,
+        output: &str,
+        target: ModuleId,
+        param: &str,
+        depth: f32,
+    ) -> Result<AssignmentId, LoomError> {
+        let source = self.output_ref(source, output)?;
+        let param = self.param_index(target, param)?;
+        self.add_assignment(source, target, param, depth)
+    }
+
+    /// Removes one modulation assignment. Takes effect on the next commit.
+    pub fn remove_assignment(&mut self, id: AssignmentId) -> Result<Assignment, LoomError> {
+        let removed = self
+            .graph
+            .assignments
+            .remove(&id)
+            .ok_or(LoomError::UnknownAssignment(id))?;
+        self.dirty = true;
+        Ok(removed)
+    }
+
+    /// Sets an assignment's depth, clamped to -1..1. Takes effect at the next
+    /// buffer, without recompiling.
+    pub fn set_assignment_depth(&mut self, id: AssignmentId, depth: f32) -> Result<f32, LoomError> {
+        let depth = clamp_depth(depth);
+        self.assignment_mut(id)?.depth = depth;
+        self.send_assignment(id)?;
+        Ok(depth)
+    }
+
+    /// Forces an assignment's polarity, or `None` to follow the source output.
+    /// Takes effect at the next buffer, without recompiling.
+    pub fn set_assignment_polarity(&mut self, id: AssignmentId, polarity: Option<Polarity>) -> Result<(), LoomError> {
+        self.assignment_mut(id)?.polarity = polarity;
+        self.send_assignment(id)
+    }
+
+    /// Turns an assignment on or off. The scheduling edge stays, so this does
+    /// not recompile. Takes effect at the next buffer.
+    pub fn set_assignment_enabled(&mut self, id: AssignmentId, enabled: bool) -> Result<(), LoomError> {
+        self.assignment_mut(id)?.enabled = enabled;
+        self.send_assignment(id)
+    }
+
+    fn assignment_mut(&mut self, id: AssignmentId) -> Result<&mut Assignment, LoomError> {
+        self.graph
+            .assignments
+            .get_mut(&id)
+            .ok_or(LoomError::UnknownAssignment(id))
+    }
+
+    fn send_assignment(&mut self, id: AssignmentId) -> Result<(), LoomError> {
+        let assignment = *self.assignment_mut(id)?;
+        self.send(Command::UpdateAssignment {
+            id,
+            depth: assignment.depth,
+            enabled: assignment.enabled,
+            polarity: assignment.polarity,
+        })
     }
 
     /// Removes the cable on an input. Returns where it came from.
@@ -438,7 +542,12 @@ impl Controller {
         if self.commands.slots() < 1 + self.pending_removals.len() {
             return Err(LoomError::QueueFull);
         }
-        let (schedule, report) = compile(&self.graph, &self.probes, self.config.max_block);
+        let (schedule, report) = compile(
+            &self.graph,
+            &self.probes,
+            self.config.sample_rate,
+            self.config.max_block,
+        );
         // Order matters: swap first (the new schedule no longer uses the
         // removed slots), then remove the instances.
         let pushed = self.commands.push(Command::SwapSchedule(Box::new(schedule))).is_ok()
@@ -477,6 +586,27 @@ impl Controller {
         Ok(())
     }
 
+    fn param_index(&self, module: ModuleId, name: &str) -> Result<usize, LoomError> {
+        self.node(module)?
+            .descriptor
+            .param_index(name)
+            .ok_or_else(|| LoomError::NoSuchParam {
+                module,
+                param: name.to_string(),
+            })
+    }
+
+    fn check_param(&self, module: ModuleId, index: usize) -> Result<(), LoomError> {
+        let node = self.node(module)?;
+        if index >= node.descriptor.params.len() {
+            return Err(LoomError::NoSuchParam {
+                module,
+                param: index.to_string(),
+            });
+        }
+        Ok(())
+    }
+
     fn check_input(&self, input: InputRef) -> Result<(), LoomError> {
         let node = self.node(input.module)?;
         if input.port >= node.descriptor.inputs.len() {
@@ -488,4 +618,9 @@ impl Controller {
         }
         Ok(())
     }
+}
+
+/// Clamps a modulation depth to -1..1. NaN becomes 0, which adds nothing.
+fn clamp_depth(depth: f32) -> f32 {
+    if depth.is_nan() { 0.0 } else { depth.clamp(-1.0, 1.0) }
 }

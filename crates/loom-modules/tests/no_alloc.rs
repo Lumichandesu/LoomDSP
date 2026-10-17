@@ -53,6 +53,23 @@ fn audio_thread_never_allocates() {
             {
                 parts.controller.remove_module(id).unwrap();
             }
+            // Assignments compile into the schedule and are filled on the
+            // audio thread, so adding and removing them here must not make
+            // `process` allocate.
+            if i % 9 == 0
+                && let Some(&id) = extra.last()
+            {
+                parts
+                    .controller
+                    .add_assignment_named(id, "lowpass", id, "cutoff", 0.2)
+                    .unwrap();
+            }
+            if i % 17 == 0 {
+                let id = parts.controller.graph().assignments().next().map(|(id, _)| id);
+                if let Some(id) = id {
+                    parts.controller.set_assignment_depth(id, -0.15).unwrap();
+                }
+            }
             parts.controller.commit().unwrap();
             if i % 50 == 0 {
                 parts.midi.send(MidiEvent::note_on(3, 0, 60 + (i % 12) as u8, 90));

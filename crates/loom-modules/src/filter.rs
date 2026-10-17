@@ -2,8 +2,8 @@
 
 use loom_core::signal::pitch;
 use loom_core::{
-    Module, ModuleConfig, ModuleDescriptor, ModuleRole, Panel, ParamOptions, ParamSpec, PortDefault, PortIo, PortSpec,
-    ProcessContext, SignalType, Widget,
+    Module, ModuleConfig, ModuleDescriptor, ModuleRole, Panel, ParamOptions, ParamSpec, Polarity, PortDefault, PortIo,
+    PortSpec, ProcessContext, SignalType, Widget,
 };
 use loom_rt::Smoothed;
 use std::f32::consts::PI;
@@ -23,6 +23,8 @@ pub static SVF: ModuleDescriptor = ModuleDescriptor {
             signal: SignalType::Audio,
             description: "The audio to filter.",
             default: PortDefault::Value(0.0),
+
+            polarity: Polarity::Bipolar,
         },
         PortSpec {
             name: "cutoff",
@@ -30,6 +32,8 @@ pub static SVF: ModuleDescriptor = ModuleDescriptor {
             signal: SignalType::Pitch,
             description: "Moves the cutoff as pitch: +0.1 doubles it.",
             default: PortDefault::Value(0.0),
+
+            polarity: Polarity::Bipolar,
         },
     ],
     outputs: &[
@@ -39,6 +43,8 @@ pub static SVF: ModuleDescriptor = ModuleDescriptor {
             signal: SignalType::Audio,
             description: "Keeps the frequencies below the cutoff.",
             default: PortDefault::Value(0.0),
+
+            polarity: Polarity::Bipolar,
         },
         PortSpec {
             name: "bandpass",
@@ -46,6 +52,8 @@ pub static SVF: ModuleDescriptor = ModuleDescriptor {
             signal: SignalType::Audio,
             description: "Keeps the frequencies near the cutoff.",
             default: PortDefault::Value(0.0),
+
+            polarity: Polarity::Bipolar,
         },
         PortSpec {
             name: "highpass",
@@ -53,6 +61,8 @@ pub static SVF: ModuleDescriptor = ModuleDescriptor {
             signal: SignalType::Audio,
             description: "Keeps the frequencies above the cutoff.",
             default: PortDefault::Value(0.0),
+
+            polarity: Polarity::Bipolar,
         },
     ],
     params: &[
@@ -66,7 +76,8 @@ pub static SVF: ModuleDescriptor = ModuleDescriptor {
             unit: "Hz",
             options: ParamOptions::DEFAULT,
         }
-        .logarithmic(),
+        .logarithmic()
+        .smooth(0.01),
         ParamSpec {
             name: "resonance",
             label: "Resonance",
@@ -76,7 +87,8 @@ pub static SVF: ModuleDescriptor = ModuleDescriptor {
             default: 0.2,
             unit: "",
             options: ParamOptions::DEFAULT,
-        },
+        }
+        .smooth(0.01),
     ],
     role: ModuleRole::Dsp(|config| Box::new(Svf::new(config))),
     panel: Panel::new(6, 3, &[Widget::knob(0, 0, "cutoff"), Widget::knob(3, 0, "resonance")]),
@@ -96,8 +108,14 @@ impl Svf {
         Self {
             sample_rate: config.sample_rate,
             // Smooth cutoff in the pitch domain, so sweeps sound even.
-            cutoff: Smoothed::new(pitch::from_hz(1_000.0), config.sample_rate, 0.01),
-            resonance: Smoothed::new(0.2, config.sample_rate, 0.01),
+            // The time matches `ParamSpec::smooth_seconds`, which the engine
+            // uses once an assignment is modulating this knob.
+            cutoff: Smoothed::new(
+                pitch::from_hz(1_000.0),
+                config.sample_rate,
+                SVF.params[0].options.smooth_seconds,
+            ),
+            resonance: Smoothed::new(0.2, config.sample_rate, SVF.params[1].options.smooth_seconds),
             ic1: 0.0,
             ic2: 0.0,
         }
@@ -106,12 +124,28 @@ impl Svf {
 
 impl Module for Svf {
     fn process(&mut self, _ctx: &ProcessContext<'_>, io: &mut PortIo<'_>) {
+        let cutoff_samples = io.modulated(0);
+        let resonance_samples = io.modulated(1);
         let ([input, cutoff_mod], [lp, bp, hp]) = io.split::<2, 3>();
         let nyquist_limit = self.sample_rate * 0.49;
         for i in 0..input.len() {
-            let cutoff_hz = pitch::to_hz(self.cutoff.tick() + cutoff_mod[i]).clamp(5.0, nyquist_limit);
+            // Tick even when modulated, so removing the assignment continues
+            // the glide from here. The heard value is the engine buffer.
+            let cutoff_pitch = self.cutoff.tick();
+            let cutoff_hz = if let Some(samples) = cutoff_samples {
+                pitch::to_hz(pitch::from_hz(samples[i]) + cutoff_mod[i])
+            } else {
+                pitch::to_hz(cutoff_pitch + cutoff_mod[i])
+            }
+            .clamp(5.0, nyquist_limit);
+            let resonance = if let Some(samples) = resonance_samples {
+                let _ = self.resonance.tick();
+                samples[i]
+            } else {
+                self.resonance.tick()
+            };
             // Resonance 0..1 maps to damping k = 2..0.02 (Q from 0.5 to 50).
-            let k = 2.0 - 1.98 * self.resonance.tick();
+            let k = 2.0 - 1.98 * resonance;
             let g = (PI * cutoff_hz / self.sample_rate).tan();
             let a1 = 1.0 / (1.0 + g * (g + k));
             let a2 = g * a1;

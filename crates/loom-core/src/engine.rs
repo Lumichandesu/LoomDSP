@@ -5,9 +5,10 @@
 //! the command queue and leaves through the garbage queue. Telemetry leaves
 //! through its own queues and is dropped when they are full (NFR-RT-07).
 
-use crate::compile::{ModuleOp, Schedule, Step};
-use crate::descriptor::MAX_DISPLAYS;
+use crate::compile::{AssignmentRuntime, ModuleOp, ParamFill, Schedule, Step};
+use crate::descriptor::{MAX_DISPLAYS, Polarity};
 use crate::display::DisplayTable;
+use crate::graph::AssignmentId;
 use crate::midi::MidiEvent;
 use crate::module::{Module, PortIo, ProcessContext};
 use crate::telemetry::{MeterReading, SCOPE_CHUNK, ScopeChunk, TelemetrySender, measure};
@@ -97,6 +98,14 @@ pub(crate) enum Command {
         slot: usize,
         index: usize,
         value: f32,
+    },
+    /// Depth, polarity, and enabled flag of one assignment. Ignored when the
+    /// running schedule has no assignment with this id.
+    UpdateAssignment {
+        id: AssignmentId,
+        depth: f32,
+        enabled: bool,
+        polarity: Option<Polarity>,
     },
     ResetModule {
         slot: usize,
@@ -237,6 +246,7 @@ impl Engine {
                 }
                 Command::SwapSchedule(mut schedule) => {
                     schedule.take_tap_state_from(&self.schedule);
+                    schedule.take_smooth_state_from(&self.schedule);
                     let old = std::mem::replace(&mut self.schedule, schedule);
                     self.discard(Garbage::Schedule(old));
                     self.stats.schedule_swaps.fetch_add(1, Ordering::Relaxed);
@@ -244,6 +254,34 @@ impl Engine {
                 Command::SetParam { slot, index, value } => {
                     if let Some(module) = self.slots[slot].as_mut() {
                         module.set_param(index, value);
+                    }
+                    let slot = slot as u32;
+                    let index = index as u16;
+                    for fill in &mut self.schedule.fills {
+                        if fill.slot == slot && fill.param == index {
+                            fill.base = value;
+                            if let Some(smooth) = fill.smooth.as_mut() {
+                                smooth.set_target(fill.spec.normalize(value));
+                            }
+                            break;
+                        }
+                    }
+                }
+                Command::UpdateAssignment {
+                    id,
+                    depth,
+                    enabled,
+                    polarity,
+                } => {
+                    if let Ok(index) = self
+                        .schedule
+                        .assignments
+                        .binary_search_by_key(&id, |assignment| assignment.id)
+                    {
+                        let assignment = &mut self.schedule.assignments[index];
+                        assignment.depth = depth;
+                        assignment.enabled = enabled;
+                        assignment.polarity = polarity;
                     }
                 }
                 Command::ResetModule { slot } => {
@@ -340,6 +378,7 @@ impl Engine {
         let Schedule {
             input_ptrs,
             output_ptrs,
+            param_ptrs,
             ops,
             taps,
             loop_ops,
@@ -347,6 +386,8 @@ impl Engine {
             steps,
             outputs,
             transport: transport_buffers,
+            fills,
+            assignments,
             ..
         } = &mut *self.schedule;
 
@@ -376,6 +417,9 @@ impl Engine {
         }
 
         let mut run_op = |op: &ModuleOp, offset: usize, len: usize| {
+            for index in op.fills.0..op.fills.1 {
+                fill_param(&mut fills[index as usize], assignments, offset, len);
+            }
             if let Some(module) = slots[op.slot as usize].as_mut() {
                 let ctx = ProcessContext {
                     sample_rate,
@@ -388,11 +432,13 @@ impl Engine {
                 // `max_block` floats. Inputs point at other modules' outputs,
                 // a unit delay buffer, the zero buffer, or a default buffer.
                 // Cycles always pass through a unit delay, so no module reads
-                // its own output. `offset + len <= frames <= max_block`.
+                // its own output. Parameter pointers address the buffers just
+                // filled above. `offset + len <= frames <= max_block`.
                 let mut io = unsafe {
                     PortIo::new(
                         &input_ptrs[op.inputs.0 as usize..op.inputs.1 as usize],
                         &output_ptrs[op.outputs.0 as usize..op.outputs.1 as usize],
+                        &param_ptrs[op.params.0 as usize..op.params.1 as usize],
                         op.connected,
                         offset,
                         len,
@@ -465,6 +511,52 @@ impl Engine {
         clip_output(right);
 
         self.transport.end_block();
+    }
+}
+
+/// Writes the modulated value of one parameter for `len` frames at `offset`.
+///
+/// A settled base with nothing added keeps the base bits, so depth 0 matches
+/// no assignment. Otherwise the sum is mapped back through the parameter.
+fn fill_param(fill: &mut ParamFill, assignments: &[AssignmentRuntime], offset: usize, len: usize) {
+    let spec = fill.spec;
+    let base = fill.base;
+    // SAFETY: the compiler allocated `buffer` for `max_block` floats, and
+    // `offset + len` stays inside that. The audio thread does not alias it
+    // with a source buffer: sources are output buffers or delay taps.
+    let buf = unsafe { std::slice::from_raw_parts_mut(fill.buffer.add(offset), len) };
+    for (i, value) in buf.iter_mut().enumerate() {
+        let mut added = 0.0;
+        let mut contributed = false;
+        for source in &fill.sources {
+            let assignment = &assignments[source.state as usize];
+            if !assignment.enabled || assignment.depth == 0.0 {
+                continue;
+            }
+            // SAFETY: `source.buffer` is an output or delay tap of `max_block`
+            // floats, and `offset + i < max_block`.
+            let sample = unsafe { *source.buffer.add(offset + i) };
+            let sample = match assignment.polarity {
+                Some(polarity) => polarity.remap(assignment.source_polarity, sample),
+                None => sample,
+            };
+            added += assignment.depth * sample;
+            contributed = true;
+        }
+        let position = if let Some(smooth) = fill.smooth.as_mut() {
+            smooth.tick()
+        } else {
+            spec.normalize(base)
+        };
+        let settled = fill
+            .smooth
+            .as_ref()
+            .is_none_or(|smooth| smooth.current() == smooth.target());
+        *value = if !contributed && settled {
+            base
+        } else {
+            spec.denormalize(position + added)
+        };
     }
 }
 

@@ -6,7 +6,7 @@
 
 use loom_core::signal::{EdgeDetector, trigger};
 use loom_core::{
-    Module, ModuleDescriptor, ModuleRole, Panel, ParamOptions, ParamSpec, PortDefault, PortIo, PortSpec,
+    Module, ModuleDescriptor, ModuleRole, Panel, ParamOptions, ParamSpec, Polarity, PortDefault, PortIo, PortSpec,
     ProcessContext, SignalType, Widget,
 };
 
@@ -29,6 +29,8 @@ pub static DIVIDE: ModuleDescriptor = ModuleDescriptor {
             signal: SignalType::Gate,
             description: "The triggers to count.",
             default: PortDefault::Value(0.0),
+
+            polarity: Polarity::Unipolar,
         },
         PortSpec {
             name: "reset",
@@ -36,6 +38,8 @@ pub static DIVIDE: ModuleDescriptor = ModuleDescriptor {
             signal: SignalType::Gate,
             description: "Starts the count again.",
             default: PortDefault::Value(0.0),
+
+            polarity: Polarity::Unipolar,
         },
     ],
     outputs: &[PortSpec {
@@ -44,6 +48,8 @@ pub static DIVIDE: ModuleDescriptor = ModuleDescriptor {
         signal: SignalType::Gate,
         description: "Fires on every Nth trigger.",
         default: PortDefault::Value(0.0),
+
+        polarity: Polarity::Unipolar,
     }],
     params: &[
         ParamSpec {
@@ -105,8 +111,16 @@ impl Divide {
 
 impl Module for Divide {
     fn process(&mut self, _ctx: &ProcessContext<'_>, io: &mut PortIo<'_>) {
+        let n = io.modulated(0);
+        let offset = io.modulated(1);
         let ([trigger_in, reset], [out]) = io.split::<2, 1>();
-        for ((out, &t), &r) in out.iter_mut().zip(trigger_in).zip(reset) {
+        for (i, ((out, &t), &r)) in out.iter_mut().zip(trigger_in).zip(reset).enumerate() {
+            if let Some(samples) = n {
+                self.n = (samples[i] as u64).max(1);
+            }
+            if let Some(samples) = offset {
+                self.offset = samples[i] as u64;
+            }
             // Reset first, so a trigger on the same frame as a reset counts
             // as the first trigger after it.
             if self.reset_in.rising(r) {
