@@ -44,8 +44,7 @@ pub fn create_engine(registry: Arc<Registry>, config: EngineConfig) -> EnginePar
         config,
         command_rx,
         garbage_tx,
-        midi_rx,
-        midi_feedback.clone(),
+        (midi_rx, midi_feedback.clone()),
         TelemetrySender {
             meters: meter_tx,
             scope: scope_tx,

@@ -146,7 +146,7 @@ impl MidiFeedback {
     pub fn last(&self) -> Option<ControlChangeSeen> {
         let packed = self.last.load(Ordering::Acquire);
         let serial = (packed >> 32) as u32;
-        (serial != 0).then(|| ControlChangeSeen {
+        (serial != 0).then_some(ControlChangeSeen {
             control: MidiControl {
                 channel: ((packed >> 16) & 0x0F) as u8,
                 controller: ((packed >> 8) & 0x7F) as u8,
