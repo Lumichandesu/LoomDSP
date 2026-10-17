@@ -18,6 +18,24 @@ We write the specification before the code, and keep it true as the code is buil
 
 **Not every change needs a spec.** Bug fixes, refactoring, tests, and small changes that do not change behaviour go straight to code. A new module follows the [module checklist](../../CONTRIBUTING.md#adding-a-module) and its help page. It needs a spec only when it brings new rules, as the arrangement modules do.
 
+## Ready to build
+
+An issue is ready to build when all of these hold:
+
+1. **Behaviour is agreed.** The issue links to a spec section marked Agreed. A new module names its catalogue ID instead, and the issue lists its ports, parameters (with ranges and defaults), and panel, matching the catalogue entry. A module that brings new rules (a new widget, a new gesture, new engine behaviour) needs a spec section as well.
+2. **The phase matches.** The milestone is the phase the catalogue or the requirement gives.
+3. **Done when.** The issue lists its checks. Each is a test or a named manual check.
+4. **Open questions are listed,** or the issue says "None".
+5. **The issue links to rules and does not copy them.** It names the spec section and says what is in and out of this issue's scope.
+
+Until all five hold, the issue carries `needs spec agreed` and does not carry `good first issue` or `hacktoberfest`.
+
+When a spec section becomes Agreed, the same pull request updates every issue that links to it: remove the label, and cut any rules the issue still copies.
+
+If an issue and its spec disagree, the spec wins. Say so in the pull request, and fix the issue.
+
+**Why:** an AI agent or a new contributor reads the issue first. A rule copied into an issue goes stale when the spec changes, and the reader builds the old rule. Newcomers are the least able to tell a stale issue from a ready one, so newcomer labels wait until the issue is ready.
+
 ## Status
 
 | Status | Meaning |

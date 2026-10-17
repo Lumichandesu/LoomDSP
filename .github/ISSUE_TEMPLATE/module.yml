@@ -13,7 +13,7 @@ body:
     id: catalogue
     attributes:
       label: Catalogue ID
-      description: The module type in docs/product/module-catalogue.md, for example MT-SHAPE-01. If there is none, propose a catalogue entry in this issue.
+      description: The module type in docs/product/module-catalogue.md, for example MT-SHAPE-01. The milestone must match its phase. If there is none, propose a catalogue entry in this issue.
     validations:
       required: true
   - type: textarea
@@ -28,7 +28,22 @@ body:
       label: Inputs, outputs, and parameters
       description: Names, signal types (audio, modulation, pitch, phase, gate), and ranges.
   - type: textarea
+    id: panel
+    attributes:
+      label: Panel
+      description: Which parameters get a knob, toggle, or radio on the tile, and which stay in the inspector. Which display values get a light.
+  - type: textarea
     id: references
     attributes:
       label: Design references
       description: Textbooks, papers, standards, or your own derivation that describe the algorithm. Please do not read or link other audio projects' source code to design a LoomDSP module, except the source code of a dependency accepted under ADR-0006 when using that dependency. Do not copy their manuals (clean room, ADR-0018).
+  - type: textarea
+    id: done
+    attributes:
+      label: Done when
+      description: Tests beyond the module checklist, for example a measured property such as aliasing or a known output for a known input.
+  - type: textarea
+    id: questions
+    attributes:
+      label: Open questions
+      description: What this issue does not settle yet, or "None".

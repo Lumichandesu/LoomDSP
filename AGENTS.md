@@ -70,6 +70,7 @@ Before writing code for a feature, read its specification in `docs/design/` (the
 - If the spec does not answer a question about behaviour (a gesture, a default, what the user sees), do not guess. Ask, or propose a spec change first.
 - If the code shows the spec is wrong, update the spec in the same pull request and say so in the description.
 - Check every acceptance criterion: as a test where possible, otherwise as a manual check listed in the pull request.
+- If the issue and the spec disagree, the spec wins. Say so in the pull request.
 - No spec is needed for bug fixes, refactoring, tests, or changes that do not change behaviour.
 
 Why: a gap in the spec gets filled with a guess, and a well-built guess is costly to undo. See [docs/design/README.md](docs/design/README.md#spec-first).

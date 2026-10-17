@@ -20,6 +20,16 @@ body:
       label: Specification
       description: Link to the spec in docs/design/ that covers this, if there is one. Features are built from an agreed spec (see docs/design/README.md).
   - type: textarea
+    id: done
+    attributes:
+      label: Done when
+      description: The checks that close this issue. Each one is a test or a named manual check. Link the spec's acceptance criteria instead of copying them.
+  - type: textarea
+    id: questions
+    attributes:
+      label: Open questions
+      description: What the spec does not answer yet, or "None". An issue with open questions is labelled `needs spec agreed`.
+  - type: textarea
     id: idea
     attributes:
       label: Possible solution
