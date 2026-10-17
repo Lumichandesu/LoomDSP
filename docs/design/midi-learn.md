@@ -106,7 +106,7 @@ midi: [
 - [x] A mapped control change still reaches a MIDI input module.
 - [x] A patch with mappings saves and loads with the same mappings. A patch without a `midi` list loads with none. A patch with two mappings on one parameter, or on one channel and controller number, fails to load with a clear error.
 - [x] Removing a mapping in the inspector stops the control from moving the parameter. Deleting a module removes its mappings.
-- [ ] `loom play` with a patch that has mappings responds to the controller with no UI.
+- [x] `loom play` with a patch that has mappings responds to the controller with no UI.
 - [x] Processing a mapped control change does not allocate (`tests/no_alloc.rs`).
 
 ## Out of scope
