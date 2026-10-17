@@ -251,7 +251,7 @@ A **Macro** module (FR-LIB-12) has one knob on its panel and one output equal to
 - Per-voice modulation (with polyphony, P2).
 - Response curves on assignments (for example exponential depth).
 - Assignments across sub-patch boundaries. Not planned: expose the parameter instead.
-- MIDI learn. It maps a controller to a base value, a separate feature ([#24](https://github.com/brylie/LoomDSP/issues/24)).
+- MIDI learn. It maps a controller to a base value, a separate feature ([MIDI learn](midi-learn.md), [#24](https://github.com/brylie/LoomDSP/issues/24)).
 
 ## Open points
 
