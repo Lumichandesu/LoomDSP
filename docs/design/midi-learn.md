@@ -57,7 +57,7 @@ The user touches the control on screen, then moves the hardware control. Learn m
 
 ### Seeing and removing mappings
 
-- The inspector shows a parameter's mapping on its row as `CC <number> · ch <channel>`, with channels counted from 1 as on hardware. A **Remove** button next to it deletes the mapping. This works in and out of learn mode.
+- The inspector shows a parameter's mapping on its row as `CC <number> · ch <channel>`, with channels counted from 1 as on hardware. A small **×** button next to it deletes the mapping ([removing an item](panels.md#removing-an-item)). This works in and out of learn mode.
 - In learn mode, the labels on the tiles show every mapping in view at a glance. *Why:* with one parameter per hardware control, the labels are a full picture of the mappings. A separate mapping list is not needed in P1.
 - Deleting a module deletes its mappings.
 

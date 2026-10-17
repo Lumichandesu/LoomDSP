@@ -121,6 +121,16 @@ The inspector stays, as the place for:
 - typing exact values;
 - modulation ranges, MIDI learn, and other settings that do not fit on a control.
 
+### Removing an item
+
+**Status:** Agreed.
+
+Lists in the inspector, such as a parameter's MIDI mapping or its modulation assignments, share one remove control.
+
+- A small **×** button at the end of the item's row removes that item. Hovering it shows what it removes, for example "Remove MIDI mapping". *Why:* one small, familiar mark in the same place on every row is quick to find and takes little room in a narrow inspector. The hover text says exactly what goes, because a bare × does not.
+- It acts at once, with no confirmation. *Why:* removing a mapping or an assignment is quick to redo, and undo ([#12](https://github.com/brylie/LoomDSP/issues/12)) will bring it back.
+- Used by [MIDI learn](midi-learn.md#seeing-and-removing-mappings) and by modulation's [remove button](modulation.md#seeing-assignments).
+
 ## Scope module
 
 The first display module.

@@ -72,7 +72,7 @@ The editing and display work ships in three slices, so each one can be built and
 #### Editing and removing
 
 - Depth, polarity, and on/off are edited in the inspector row. They take effect at the next buffer and do not recompile (engine rule, see [Engine and API](#engine-and-api)).
-- The remove button removes that assignment.
+- The remove button removes that assignment. It is the inspector's small **×** button ([removing an item](panels.md#removing-an-item)).
 - Deleting a module removes the assignments it is part of. Its badge counts and arcs update.
 - Saving writes assignments into the patch, as the engine already does.
 

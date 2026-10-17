@@ -800,10 +800,7 @@ impl App {
                                 row![
                                     text(control.to_string()).size(11).color(DIM),
                                     space::horizontal(),
-                                    button(text("Remove").size(11))
-                                        .padding([1, 6])
-                                        .style(button::text)
-                                        .on_press(Message::Unmap { module: id, index }),
+                                    remove_button("Remove MIDI mapping", Message::Unmap { module: id, index }),
                                 ]
                                 .align_y(iced::Alignment::Center),
                             );
@@ -907,6 +904,21 @@ impl App {
         .align_y(iced::Alignment::Center)
         .into()
     }
+}
+
+/// The inspector's remove button for an item in a list, such as a MIDI
+/// mapping or a modulation assignment: a small × at the end of its row,
+/// with hover text that names what it removes (panels.md, The inspector).
+fn remove_button<'a>(what: &'a str, on_press: Message) -> Element<'a, Message> {
+    tooltip(
+        button(text("×").size(14))
+            .padding([0, 6])
+            .style(button::text)
+            .on_press(on_press),
+        container(text(what).size(12)).padding(6).style(container::rounded_box),
+        tooltip::Position::Top,
+    )
+    .into()
 }
 
 /// Stats bar text: one line, never wrapped.
