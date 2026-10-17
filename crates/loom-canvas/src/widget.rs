@@ -416,7 +416,7 @@ where
             CanvasPrimitive {
                 geometry,
                 controls,
-                overlay: self.overlay(state),
+                overlay: self.overlay_in(state, state.camera.visible(bounds.size())),
                 bars,
                 camera: state.camera,
                 cable_dim: CABLE_OPACITY,
@@ -1181,6 +1181,43 @@ impl<Message> PatchCanvas<'_, Message> {
         }
     }
 
+    /// The overlay for a view whose visible world area is `visible`. Learn
+    /// mode outlines only the controls there, so its cost follows what is on
+    /// screen, not the size of the patch.
+    fn overlay_in(&self, state: &State, visible: Rectangle) -> Overlay {
+        let mut overlay = self.overlay(state);
+        let p = &self.palette;
+        // MIDI learn mode outlines every control on screen, and the armed
+        // one more strongly, so the user sees what a click will do.
+        if let Some(learn) = self.learn {
+            let visible_modules = self
+                .scene
+                .modules()
+                .iter()
+                .filter(|module| module.bounds().intersects(&visible));
+            for module in visible_modules {
+                for (index, view) in module.panel.widgets.iter().enumerate() {
+                    if !view.is_control() {
+                        continue;
+                    }
+                    let Some(rect) = module.widget_bounds(index) else {
+                        continue;
+                    };
+                    let (ring, radius) = focus_ring(&view.kind, rect);
+                    let (colour, width) = if learn.armed == Some((module.id, index)) {
+                        (p.selection, 2.5)
+                    } else {
+                        (p.focus, 1.0)
+                    };
+                    overlay
+                        .shapes
+                        .push(Shape::new(ring, radius, Color::TRANSPARENT, colour, width));
+                }
+            }
+        }
+        overlay
+    }
+
     fn overlay(&self, state: &State) -> Overlay {
         let mut overlay = Overlay::default();
         let p = &self.palette;
@@ -1259,29 +1296,6 @@ impl<Message> PatchCanvas<'_, Message> {
             overlay
                 .shapes
                 .push(Shape::new(ring, radius, Color::TRANSPARENT, p.focus, 1.5));
-        }
-        // MIDI learn mode outlines every control, and the armed one more
-        // strongly, so the user sees what a click will do.
-        if let Some(learn) = self.learn {
-            for module in self.scene.modules() {
-                for (index, view) in module.panel.widgets.iter().enumerate() {
-                    if !view.is_control() {
-                        continue;
-                    }
-                    let Some(rect) = module.widget_bounds(index) else {
-                        continue;
-                    };
-                    let (ring, radius) = focus_ring(&view.kind, rect);
-                    let (colour, width) = if learn.armed == Some((module.id, index)) {
-                        (p.selection, 2.5)
-                    } else {
-                        (p.focus, 1.0)
-                    };
-                    overlay
-                        .shapes
-                        .push(Shape::new(ring, radius, Color::TRANSPARENT, colour, width));
-                }
-            }
         }
         match &state.interaction {
             Interaction::Wiring { from } => {
@@ -2328,5 +2342,24 @@ mod tests {
         // With nothing focused, Space is still the Run shortcut.
         let events = drive(&canvas, &mut state, &key_event(keyboard::key::Named::Space, true), at);
         assert_eq!(events, vec![CanvasEvent::ToggleRun]);
+    }
+
+    /// Learn mode outlines controls on screen only.
+    #[test]
+    fn learn_outlines_cover_only_visible_tiles() {
+        let mut near = module(1, 0.0);
+        near.panel = panel();
+        let far = ModuleView {
+            panel: panel(),
+            ..module(2, 5_000.0)
+        };
+        let scene = Scene::new(vec![near, far], Vec::new());
+        let none = BTreeSet::new();
+        let learn = LearnView::default();
+        let canvas = learning(&scene, &none, &learn);
+        let plain = canvas.overlay(&State::default()).shapes.len();
+        let view = Rectangle::new(Point::new(-50.0, -50.0), Size::new(800.0, 600.0));
+        // Two controls (a knob and a toggle) on the one visible tile.
+        assert_eq!(canvas.overlay_in(&State::default(), view).shapes.len(), plain + 2);
     }
 }

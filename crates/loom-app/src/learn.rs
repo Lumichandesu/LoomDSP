@@ -45,7 +45,10 @@ pub fn stream(watch: &Watch) -> impl Stream<Item = u32> + use<> {
     let (mut tx, rx) = mpsc::channel(1);
     let reader = watch.reader.clone();
     std::thread::spawn(move || {
-        let mut last = reader.last_control_change().map(|seen| seen.serial);
+        // Start from "nothing seen", so a control change that arrives while
+        // the thread starts is still reported. The app ignores any that came
+        // before a parameter was armed.
+        let mut last = None;
         while !tx.is_closed() {
             let now = reader.last_control_change().map(|seen| seen.serial);
             if let Some(serial) = now.filter(|_| now != last) {
