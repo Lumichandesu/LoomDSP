@@ -123,7 +123,7 @@ Every parameter maps between its value and its control's position, from 0 to 1. 
 - Modules read a modulated parameter through `PortIo` as a per-sample slice. `PortIo::param_at` gives the value at a frame. A parameter with no assignments stays the value from `set_param`, one per block.
 - Adding or removing an assignment recompiles the graph. Changing depth, polarity, or enabled takes effect at the next buffer, like a parameter change, and does not allocate on the audio thread.
 - Deleting a module removes the assignments it is part of.
-- Patch format (RON), using the same `(module id, port or parameter name)` pairs as cables. Old files omit `modulation` and still load. `polarity` is omitted when the assignment follows the source. `enabled: false` is written only when the assignment is off. There is no format version bump.
+- Patch format (RON), using the same `(module id, port or parameter name)` pairs as cables. Old files omit `modulation` and still load. `polarity` is omitted when the assignment follows the source. `enabled: false` is written only when the assignment is off. The format stays at version 1. *Why:* LoomDSP is a pre-release alpha, so no released build needs to refuse the new field. The cost: an older build loads a modulated patch without its assignments and plays it unmodulated. Bump the version for format changes once LoomDSP has a release.
 
 ```ron
 modulation: [

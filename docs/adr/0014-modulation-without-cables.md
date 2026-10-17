@@ -1,6 +1,6 @@
 # ADR-0014: Modulation without cables
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-10-17)
 - **Date:** 2026-10-15
 - **Related requirements:** FR-MOD-01 to FR-MOD-08, FR-LIB-12, FR-ENCAP-03
 - **Related decisions:** ADR-0002 (graph execution), ADR-0007 (signal model), ADR-0011 (everything is a module), ADR-0013 (modules carry their own panel)
@@ -38,5 +38,5 @@ Option 4. **A parameter can be modulated by any output through a modulation assi
 - Hidden routing is the risk. Hover, the source's badge, and the matrix must make every assignment easy to find. This is a hard requirement in the specification, not polish.
 - The module API changes: a modulated parameter becomes a per-sample buffer, not one value per block. Every module is updated once. Unmodulated parameters stay cheap.
 - Assignments do not cross sub-patch boundaries. To modulate something inside a sub-patch, expose the parameter (FR-ENCAP-03). This keeps sub-patches self-contained.
-- The patch format gains a list of assignments, with a migration (ADR-0008).
+- The patch format gains a list of assignments (ADR-0008). Older files without it still load, so no migration step is needed.
 - Exported plugins carry their modulation unchanged, because it is part of the patch.
