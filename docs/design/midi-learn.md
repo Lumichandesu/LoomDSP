@@ -94,8 +94,8 @@ midi: [
 
 ## Acceptance criteria
 
-- [ ] Pressing **MIDI learn** starts learn mode. Clicking a tile control or an inspector row in learn mode arms its parameter and does not change its value.
-- [ ] Given an armed parameter, when a control change arrives, then one mapping is made, the parameter takes the control's value, nothing is armed, and learn mode stays on.
+- [x] Pressing **MIDI learn** starts learn mode. Clicking a tile control or an inspector row in learn mode arms its parameter and does not change its value.
+- [x] Given an armed parameter, when a control change arrives, then one mapping is made, the parameter takes the control's value, nothing is armed, and learn mode stays on.
 - [ ] Outside learn mode, clicking a control and then moving a hardware control makes no mapping.
 - [x] Given a mapping, when its control change arrives, then the parameter's base value is `denormalize(value / 127)`: the minimum at 0, the maximum at 127, and the middle of a logarithmic range at 64 (within one step).
 - [x] A control change on another channel or controller number does not move the parameter.
