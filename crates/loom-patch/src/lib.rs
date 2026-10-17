@@ -23,13 +23,13 @@
 //! ```
 //!
 //! Saved files are canonical: modules sorted by ID, cables sorted by input,
-//! parameters sorted by name. This keeps git diffs small. Modulation keeps
+//! parameters sorted by name, MIDI mappings sorted by target. This keeps git diffs small. Modulation keeps
 //! the order the assignments were made in, because the engine adds several
 //! assignments on one parameter in that order, and float sums depend on it.
 
 #![warn(missing_docs)]
 
-use loom_core::{Controller, Graph, InputRef, LoomError, ModuleId, OutputRef, Polarity};
+use loom_core::{Controller, Graph, InputRef, LoomError, MidiControl, ModuleId, OutputRef, Polarity};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -58,6 +58,9 @@ pub struct Patch {
     /// Modulation assignments. Omitted when empty, so older files still load.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub modulation: Vec<PatchModulation>,
+    /// MIDI mappings (MIDI learn). Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub midi: Vec<PatchMidiMapping>,
 }
 
 /// A module in a patch file.
@@ -112,6 +115,20 @@ pub struct PatchModulation {
     /// False skips the assignment. Missing means on.
     #[serde(default = "enabled_by_default", skip_serializing_if = "is_enabled")]
     pub enabled: bool,
+}
+
+/// A MIDI mapping in a patch file: a hardware control that sets a parameter.
+///
+/// `target` is `(module id, parameter name)`. `channel` is 0 to 15, as in
+/// MIDI. Spec: `docs/design/midi-learn.md`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PatchMidiMapping {
+    /// Parameter that is set.
+    pub target: (u32, String),
+    /// MIDI channel, 0 to 15.
+    pub channel: u8,
+    /// Controller number, 0 to 127.
+    pub controller: u8,
 }
 
 /// Polarity stored in a patch file. Matches [`Polarity`].
@@ -194,6 +211,13 @@ pub enum PatchError {
     /// The patch refers to something the engine rejects.
     #[error(transparent)]
     Engine(#[from] LoomError),
+    /// Two MIDI mappings share a parameter or a control. Learning never makes
+    /// that, so the file was edited by hand.
+    #[error("two MIDI mappings use {what}")]
+    DuplicateMidiMapping {
+        /// The shared parameter or control.
+        what: String,
+    },
     /// A parameter name does not exist on a module.
     #[error("module {module}: unknown parameter `{param}`")]
     UnknownParam {
@@ -214,6 +238,7 @@ impl Patch {
             modules: Vec::new(),
             cables: Vec::new(),
             modulation: Vec::new(),
+            midi: Vec::new(),
         }
     }
 
@@ -264,6 +289,8 @@ impl Patch {
     pub fn canonicalise(&mut self) {
         self.modules.sort_by_key(|m| m.id);
         self.cables.sort_by(|a, b| (a.to.0, &a.to.1).cmp(&(b.to.0, &b.to.1)));
+        self.midi
+            .sort_by(|a, b| (a.target.0, &a.target.1).cmp(&(b.target.0, &b.target.1)));
     }
 
     /// Upgrades an older patch to [`CURRENT_VERSION`].
@@ -321,7 +348,43 @@ impl Patch {
                 controller.set_assignment_enabled(id, false)?;
             }
         }
+        self.check_midi()?;
+        for mapping in &self.midi {
+            let control = MidiControl {
+                channel: mapping.channel,
+                controller: mapping.controller,
+            };
+            controller
+                .map_midi_named(control, ModuleId(mapping.target.0), &mapping.target.1)
+                .map_err(|error| match error {
+                    LoomError::NoSuchParam { .. } => PatchError::UnknownParam {
+                        module: mapping.target.0,
+                        param: mapping.target.1.clone(),
+                    },
+                    other => PatchError::Engine(other),
+                })?;
+        }
         controller.commit()?;
+        Ok(())
+    }
+
+    /// Refuses two MIDI mappings on one parameter or one control. The
+    /// controller would quietly keep the last one, which hides the mistake.
+    fn check_midi(&self) -> Result<(), PatchError> {
+        let mut targets = std::collections::BTreeSet::new();
+        let mut controls = std::collections::BTreeSet::new();
+        for mapping in &self.midi {
+            if !targets.insert(&mapping.target) {
+                return Err(PatchError::DuplicateMidiMapping {
+                    what: format!("parameter `{}` of module {}", mapping.target.1, mapping.target.0),
+                });
+            }
+            if !controls.insert((mapping.channel, mapping.controller)) {
+                return Err(PatchError::DuplicateMidiMapping {
+                    what: format!("controller {} on channel {}", mapping.controller, mapping.channel),
+                });
+            }
+        }
         Ok(())
     }
 
@@ -361,6 +424,13 @@ impl Patch {
                 depth: assignment.depth,
                 polarity: assignment.polarity.map(PatchPolarity::from),
                 enabled: assignment.enabled,
+            });
+        }
+        for (_, mapping) in graph.midi_mappings() {
+            patch.midi.push(PatchMidiMapping {
+                target: (mapping.target.0, param_name(graph, mapping.target, mapping.param)),
+                channel: mapping.control.channel,
+                controller: mapping.control.controller,
             });
         }
         patch.canonicalise();
@@ -516,6 +586,74 @@ Patch(
             .load_into(&mut reloaded.controller)
             .unwrap();
         assert_eq!(order(reloaded.controller.graph()), before);
+    }
+
+    const MAPPED: &str = r#"
+Patch(
+    version: 1,
+    name: "Mapped",
+    modules: [
+        (id: 1, kind: "loom.filter.svf@1"),
+    ],
+    midi: [
+        (target: (1, "resonance"), channel: 0, controller: 71),
+        (target: (1, "cutoff"), channel: 2, controller: 74),
+    ],
+)
+"#;
+
+    #[test]
+    fn midi_mappings_round_trip_and_old_patches_load() {
+        let old = Patch::from_ron(SIMPLE).unwrap();
+        assert!(old.midi.is_empty());
+        let mut parts = create_engine(loom_modules::registry(), EngineConfig::default());
+        old.load_into(&mut parts.controller).unwrap();
+        assert_eq!(parts.controller.graph().midi_mappings().count(), 0);
+        let text = Patch::from_graph("Simple sine", parts.controller.graph())
+            .to_ron()
+            .unwrap();
+        assert!(!text.contains("midi:"));
+
+        let patch = Patch::from_ron(MAPPED).unwrap();
+        let mut parts = create_engine(loom_modules::registry(), EngineConfig::default());
+        patch.load_into(&mut parts.controller).unwrap();
+        let saved = Patch::from_graph("Mapped", parts.controller.graph());
+        let mut expected = patch.clone();
+        expected.canonicalise();
+        assert_eq!(saved, expected);
+        // Sorted by target.
+        assert_eq!(saved.midi[0].target.1, "cutoff");
+        assert_eq!((saved.midi[0].channel, saved.midi[0].controller), (2, 74));
+        let text = saved.to_ron().unwrap();
+        assert_eq!(Patch::from_ron(&text).unwrap().to_ron().unwrap(), text);
+    }
+
+    #[test]
+    fn rejects_bad_midi_mappings() {
+        let load = |text: &str| {
+            let mut parts = create_engine(loom_modules::registry(), EngineConfig::default());
+            Patch::from_ron(text).unwrap().load_into(&mut parts.controller)
+        };
+        let same_param = MAPPED.replace("\"resonance\"", "\"cutoff\"");
+        assert!(matches!(
+            load(&same_param),
+            Err(PatchError::DuplicateMidiMapping { .. })
+        ));
+        let same_control = MAPPED.replace("channel: 2, controller: 74", "channel: 0, controller: 71");
+        assert!(matches!(
+            load(&same_control),
+            Err(PatchError::DuplicateMidiMapping { .. })
+        ));
+        let unknown = MAPPED.replace("\"cutoff\"", "\"cut\"");
+        assert!(matches!(
+            load(&unknown),
+            Err(PatchError::UnknownParam { module: 1, .. })
+        ));
+        let bad_channel = MAPPED.replace("channel: 2", "channel: 16");
+        assert!(matches!(
+            load(&bad_channel),
+            Err(PatchError::Engine(LoomError::InvalidMidiControl(_)))
+        ));
     }
 
     #[test]

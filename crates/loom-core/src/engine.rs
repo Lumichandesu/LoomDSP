@@ -9,7 +9,8 @@ use crate::compile::{AssignmentRuntime, ModuleOp, ParamFill, Schedule, Step};
 use crate::descriptor::{MAX_DISPLAYS, Polarity};
 use crate::display::DisplayTable;
 use crate::graph::AssignmentId;
-use crate::midi::MidiEvent;
+use crate::midi::{MidiEvent, MidiMessage};
+use crate::midi_map::{MidiControl, MidiFeedback};
 use crate::module::{Module, PortIo, ProcessContext};
 use crate::telemetry::{MeterReading, SCOPE_CHUNK, ScopeChunk, TelemetrySender, measure};
 use crate::transport::{TimeSignature, Transport};
@@ -135,6 +136,11 @@ pub struct Engine {
     garbage: Producer<Garbage>,
     midi_in: Consumer<MidiEvent>,
     midi: Vec<MidiEvent>,
+    /// What MIDI mappings did, for the controller (MIDI learn).
+    midi_feedback: Arc<MidiFeedback>,
+    /// Control changes received, for [`MidiFeedback::record`]. Never 0
+    /// after the first one.
+    cc_serial: u32,
     telemetry: TelemetrySender,
     /// The patch transport (ADR-0015). Not part of the schedule, so editing
     /// the patch never moves it.
@@ -152,6 +158,7 @@ impl Engine {
         commands: Consumer<Command>,
         garbage: Producer<Garbage>,
         midi_in: Consumer<MidiEvent>,
+        midi_feedback: Arc<MidiFeedback>,
         telemetry: TelemetrySender,
         displays: Arc<DisplayTable>,
         stats: Arc<EngineStats>,
@@ -165,6 +172,8 @@ impl Engine {
             garbage,
             midi_in,
             midi: Vec::with_capacity(config.midi_capacity),
+            midi_feedback,
+            cc_serial: 0,
             telemetry,
             transport: Transport::new(config.sample_rate),
             frame: 0,
@@ -186,6 +195,7 @@ impl Engine {
         let frames = left.len().min(right.len());
         self.apply_commands();
         self.collect_midi(frames);
+        self.apply_midi_maps();
 
         left[..frames].fill(0.0);
         right[..frames].fill(0.0);
@@ -255,20 +265,7 @@ impl Engine {
                     self.stats.schedule_swaps.fetch_add(1, Ordering::Relaxed);
                 }
                 Command::SetParam { slot, index, value } => {
-                    if let Some(module) = self.slots[slot].as_mut() {
-                        module.set_param(index, value);
-                    }
-                    let slot = slot as u32;
-                    let index = index as u16;
-                    for fill in &mut self.schedule.fills {
-                        if fill.slot == slot && fill.param == index {
-                            fill.base = value;
-                            if let Some(smooth) = fill.smooth.as_mut() {
-                                smooth.set_target(fill.spec.normalize(value));
-                            }
-                            break;
-                        }
-                    }
+                    set_base(&mut self.slots, &mut self.schedule.fills, slot, index, value);
                 }
                 Command::UpdateAssignment {
                     id,
@@ -370,6 +367,39 @@ impl Engine {
             // keeps the audio thread free of allocation.
             let at = self.midi.partition_point(|e| e.frame <= event.frame);
             self.midi.insert(at, event);
+        }
+    }
+
+    /// Sets the base value of every mapped parameter whose control change
+    /// arrived in this buffer, at its start (MIDI learn, rule 4). Every
+    /// control change is also recorded for learning, and the events stay in
+    /// the list, so modules still see them (rule 6).
+    fn apply_midi_maps(&mut self) {
+        for event in &self.midi {
+            let MidiMessage::ControlChange {
+                channel,
+                controller,
+                value,
+            } = event.message()
+            else {
+                continue;
+            };
+            let control = MidiControl { channel, controller };
+            self.cc_serial = self.cc_serial.wrapping_add(1).max(1);
+            self.midi_feedback.record(control, value, self.cc_serial);
+            let maps = &self.schedule.midi_maps;
+            let start = maps.partition_point(|map| map.control < control);
+            for map in maps[start..].iter().take_while(|map| map.control == control) {
+                let base = crate::midi_map::control_value(map.spec, value);
+                set_base(
+                    &mut self.slots,
+                    &mut self.schedule.fills,
+                    map.slot as usize,
+                    usize::from(map.param),
+                    base,
+                );
+                self.midi_feedback.write(control, map.id, self.cc_serial, value);
+            }
         }
     }
 
@@ -514,6 +544,25 @@ impl Engine {
         clip_output(right);
 
         self.transport.end_block();
+    }
+}
+
+/// Sets a parameter's base value: on the module, and on its fill if it is
+/// modulated, where a smoothed base glides to it.
+fn set_base(slots: &mut [Option<Box<dyn Module>>], fills: &mut [ParamFill], slot: usize, index: usize, value: f32) {
+    if let Some(module) = slots[slot].as_mut() {
+        module.set_param(index, value);
+    }
+    let slot = slot as u32;
+    let index = index as u16;
+    for fill in fills {
+        if fill.slot == slot && fill.param == index {
+            fill.base = value;
+            if let Some(smooth) = fill.smooth.as_mut() {
+                smooth.set_target(fill.spec.normalize(value));
+            }
+            break;
+        }
     }
 }
 

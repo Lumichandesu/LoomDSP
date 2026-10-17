@@ -7,6 +7,7 @@ use crate::engine::{Command, Engine, EngineConfig, EngineStats, Garbage};
 use crate::error::LoomError;
 use crate::graph::{Assignment, AssignmentId, Graph, InputRef, ModuleId, Node, OutputRef};
 use crate::midi::MidiEvent;
+use crate::midi_map::{ControlChangeSeen, MidiControl, MidiFeedback, MidiMapping, MidiMappingId, control_value};
 use crate::registry::Registry;
 use crate::telemetry::{ProbeId, ProbeKind, Telemetry, TelemetrySender};
 use crate::transport::{TimeSignature, TransportSettings, clamp_tempo};
@@ -38,11 +39,13 @@ pub fn create_engine(registry: Arc<Registry>, config: EngineConfig) -> EnginePar
     let (scope_tx, scope_rx) = RingBuffer::new(config.scope_capacity);
     let stats = Arc::new(EngineStats::default());
     let displays = Arc::new(DisplayTable::new(config.max_modules));
+    let midi_feedback = Arc::new(MidiFeedback::new());
     let engine = Engine::new(
         config,
         command_rx,
         garbage_tx,
         midi_rx,
+        midi_feedback.clone(),
         TelemetrySender {
             meters: meter_tx,
             scope: scope_tx,
@@ -61,6 +64,9 @@ pub fn create_engine(registry: Arc<Registry>, config: EngineConfig) -> EnginePar
         next_probe: 1,
         next_id: 1,
         next_assignment: 1,
+        next_midi_mapping: 1,
+        midi_seen: BTreeMap::new(),
+        midi_feedback,
         dirty: false,
         last_report: CompileReport::default(),
         transport: TransportSettings::default(),
@@ -106,6 +112,11 @@ pub struct Controller {
     next_probe: u32,
     next_id: u32,
     next_assignment: u32,
+    next_midi_mapping: u32,
+    /// The last feedback sequence number applied, per MIDI mapping.
+    midi_seen: BTreeMap<MidiMappingId, u32>,
+    /// What the engine's MIDI mappings did (MIDI learn, rules 2 and 3).
+    midi_feedback: Arc<MidiFeedback>,
     dirty: bool,
     last_report: CompileReport,
     /// What the engine's transport is set to, as of the last command sent.
@@ -219,6 +230,7 @@ impl Controller {
             .assignments
             .retain(|_, assignment| assignment.source.module != id && assignment.target != id);
         self.probes.retain(|_, (from, _)| from.module != id);
+        self.graph.midi_mappings.retain(|_, mapping| mapping.target != id);
         if let Some(slot) = node.slot {
             // The running schedule still uses this slot. The instance is
             // removed after the next schedule swap (see `commit`).
@@ -344,6 +356,110 @@ impl Controller {
             enabled: assignment.enabled,
             polarity: assignment.polarity,
         })
+    }
+
+    /// Maps a hardware control to a parameter. Takes effect on the next
+    /// [`Controller::commit`].
+    ///
+    /// A parameter has one mapping, and so does a control, so this first
+    /// removes any mapping on the parameter and any mapping on the control.
+    /// Those are returned, at most two, so the UI can say what moved.
+    /// Spec: `docs/design/midi-learn.md`.
+    pub fn map_midi(
+        &mut self,
+        control: MidiControl,
+        target: ModuleId,
+        param: usize,
+    ) -> Result<(MidiMappingId, Vec<MidiMapping>), LoomError> {
+        if !control.is_valid() {
+            return Err(LoomError::InvalidMidiControl(control));
+        }
+        self.check_param(target, param)?;
+        let replaced: Vec<MidiMappingId> = self
+            .graph
+            .midi_mappings()
+            .filter(|(_, mapping)| mapping.control == control || (mapping.target == target && mapping.param == param))
+            .map(|(id, _)| id)
+            .collect();
+        let removed = replaced
+            .into_iter()
+            .filter_map(|id| {
+                self.midi_seen.remove(&id);
+                self.graph.midi_mappings.remove(&id)
+            })
+            .collect();
+        let id = MidiMappingId(self.next_midi_mapping);
+        self.next_midi_mapping += 1;
+        self.graph
+            .midi_mappings
+            .insert(id, MidiMapping { control, target, param });
+        self.dirty = true;
+        Ok((id, removed))
+    }
+
+    /// Maps a hardware control to a parameter by name.
+    pub fn map_midi_named(
+        &mut self,
+        control: MidiControl,
+        target: ModuleId,
+        param: &str,
+    ) -> Result<(MidiMappingId, Vec<MidiMapping>), LoomError> {
+        let param = self.param_index(target, param)?;
+        self.map_midi(control, target, param)
+    }
+
+    /// Finishes MIDI learn: maps the control that moved to a parameter, and
+    /// sets the parameter from that control change, so the user hears at
+    /// once that the link works. Commit afterwards.
+    pub fn learn_midi(
+        &mut self,
+        seen: ControlChangeSeen,
+        target: ModuleId,
+        param: usize,
+    ) -> Result<(MidiMappingId, Vec<MidiMapping>), LoomError> {
+        let result = self.map_midi(seen.control, target, param)?;
+        let spec = &self.node(target)?.descriptor.params[param];
+        self.set_param(target, param, control_value(spec, seen.value))?;
+        Ok(result)
+    }
+
+    /// Removes the MIDI mapping on a parameter, if there is one. Takes effect
+    /// on the next [`Controller::commit`].
+    pub fn unmap_midi(&mut self, target: ModuleId, param: usize) -> Result<Option<MidiMapping>, LoomError> {
+        self.check_param(target, param)?;
+        let Some((id, _)) = self.graph.midi_mapping_of(target, param) else {
+            return Ok(None);
+        };
+        self.midi_seen.remove(&id);
+        self.dirty = true;
+        Ok(self.graph.midi_mappings.remove(&id))
+    }
+
+    /// The last control change the engine received, from any device, for
+    /// MIDI learn. `None` before the first one.
+    pub fn last_control_change(&self) -> Option<ControlChangeSeen> {
+        self.midi_feedback.last()
+    }
+
+    /// Copies the values MIDI mappings set in the engine into the graph, so
+    /// the UI shows and saves what plays. Call it whenever the UI draws.
+    /// Returns the parameters that changed.
+    pub fn sync_midi(&mut self) -> Vec<(ModuleId, usize)> {
+        let mut changed = Vec::new();
+        for (&id, mapping) in &self.graph.midi_mappings {
+            let entry = self.midi_feedback.read(mapping.control);
+            if entry.id != id || self.midi_seen.get(&id) == Some(&entry.sequence) {
+                continue;
+            }
+            self.midi_seen.insert(id, entry.sequence);
+            if let Some(node) = self.graph.nodes.get_mut(&mapping.target)
+                && let Some(spec) = node.descriptor.params.get(mapping.param)
+            {
+                node.params[mapping.param] = control_value(spec, entry.value);
+                changed.push((mapping.target, mapping.param));
+            }
+        }
+        changed
     }
 
     /// Removes the cable on an input. Returns where it came from.

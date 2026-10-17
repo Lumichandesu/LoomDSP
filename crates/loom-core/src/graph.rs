@@ -1,6 +1,7 @@
 //! The editable patch graph, owned by the control thread.
 
 use crate::descriptor::{ModuleDescriptor, ModuleRole, Polarity};
+use crate::midi_map::{MidiControl, MidiMapping, MidiMappingId};
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -80,7 +81,8 @@ impl Node {
     }
 }
 
-/// Modules, cables, and modulation assignments. Each input has at most one cable.
+/// Modules, cables, modulation assignments, and MIDI mappings. Each input has
+/// at most one cable.
 #[derive(Debug, Default)]
 pub struct Graph {
     pub(crate) nodes: BTreeMap<ModuleId, Node>,
@@ -89,6 +91,8 @@ pub struct Graph {
     /// Modulation assignments, in id order. That order is the order their
     /// depths are added.
     pub(crate) assignments: BTreeMap<AssignmentId, Assignment>,
+    /// MIDI mappings. A parameter has at most one, and so does a control.
+    pub(crate) midi_mappings: BTreeMap<MidiMappingId, MidiMapping>,
 }
 
 impl Graph {
@@ -120,6 +124,22 @@ impl Graph {
     /// One modulation assignment.
     pub fn assignment(&self, id: AssignmentId) -> Option<&Assignment> {
         self.assignments.get(&id)
+    }
+
+    /// All MIDI mappings, sorted by id.
+    pub fn midi_mappings(&self) -> impl Iterator<Item = (MidiMappingId, &MidiMapping)> {
+        self.midi_mappings.iter().map(|(id, mapping)| (*id, mapping))
+    }
+
+    /// The MIDI mapping on a parameter, if any.
+    pub fn midi_mapping_of(&self, module: ModuleId, param: usize) -> Option<(MidiMappingId, &MidiMapping)> {
+        self.midi_mappings()
+            .find(|(_, mapping)| mapping.target == module && mapping.param == param)
+    }
+
+    /// The MIDI mapping on a hardware control, if any.
+    pub fn midi_mapping_on(&self, control: MidiControl) -> Option<(MidiMappingId, &MidiMapping)> {
+        self.midi_mappings().find(|(_, mapping)| mapping.control == control)
     }
 
     /// Number of modules.

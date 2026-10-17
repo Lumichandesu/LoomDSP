@@ -21,6 +21,7 @@
 
 use crate::descriptor::{ModuleRole, ParamSpec, Polarity, PortDefault};
 use crate::graph::{AssignmentId, Graph, InputRef, ModuleId, OutputRef};
+use crate::midi_map::MidiMapOp;
 use crate::telemetry::{ProbeId, ProbeKind};
 use loom_rt::Smoothed;
 use std::collections::{BTreeMap, BTreeSet};
@@ -189,6 +190,8 @@ pub(crate) struct Schedule {
     pub fills: Vec<ParamFill>,
     pub assignments: Vec<AssignmentRuntime>,
     pub param_ptrs: Vec<(u16, *const f32)>,
+    /// MIDI mappings, sorted by control.
+    pub midi_maps: Vec<MidiMapOp>,
 }
 
 // SAFETY: the raw pointers only point into buffers owned by this schedule.
@@ -214,6 +217,7 @@ impl Schedule {
             fills: Vec::new(),
             assignments: Vec::new(),
             param_ptrs: Vec::new(),
+            midi_maps: Vec::new(),
         }
     }
 
@@ -903,8 +907,30 @@ pub(crate) fn compile(
             })
             .collect(),
         param_ptrs,
+        midi_maps: compile_midi_maps(graph),
     };
     (schedule, report)
+}
+
+/// The graph's MIDI mappings, sorted by control so the engine can find a
+/// control change's mapping with a binary search.
+fn compile_midi_maps(graph: &Graph) -> Vec<MidiMapOp> {
+    let mut maps: Vec<MidiMapOp> = graph
+        .midi_mappings
+        .iter()
+        .filter_map(|(&id, mapping)| {
+            let node = graph.nodes.get(&mapping.target)?;
+            Some(MidiMapOp {
+                control: mapping.control,
+                id,
+                slot: node.slot? as u32,
+                param: u16::try_from(mapping.param).ok()?,
+                spec: node.descriptor.params.get(mapping.param)?,
+            })
+        })
+        .collect();
+    maps.sort_by_key(|map| map.control);
+    maps
 }
 
 /// Tarjan's strongly connected components. Returns SCCs in reverse

@@ -13,7 +13,7 @@ mod common;
 
 use assert_no_alloc::{AllocDisabler, assert_no_alloc};
 use common::*;
-use loom_core::{MidiEvent, OutputRef, ProbeKind, TimeSignature};
+use loom_core::{MidiControl, MidiEvent, OutputRef, ProbeKind, TimeSignature};
 
 #[global_allocator]
 static ALLOCATOR: AllocDisabler = AllocDisabler;
@@ -63,6 +63,22 @@ fn audio_thread_never_allocates() {
                     .controller
                     .add_assignment_named(id, "lowpass", id, "cutoff", 0.2)
                     .unwrap();
+            }
+            // MIDI mappings compile into the schedule too, and control
+            // changes set parameters on the audio thread.
+            if i % 9 == 4
+                && let Some(&id) = extra.last()
+            {
+                let control = MidiControl {
+                    channel: 0,
+                    controller: (i / 9 % 128) as u8,
+                };
+                parts.controller.map_midi_named(control, id, "cutoff").unwrap();
+            }
+            if i % 3 == 0 {
+                parts
+                    .midi
+                    .send(MidiEvent::control_change(0, 0, (i / 9 % 128) as u8, (i % 128) as u8));
             }
             if i % 17 == 0 {
                 let id = parts.controller.graph().assignments().next().map(|(id, _)| id);

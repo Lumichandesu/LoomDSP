@@ -76,6 +76,11 @@ impl MidiEvent {
         Self::from_bytes(frame, &[0x80 | (channel & 0x0F), note & 0x7F, 0])
     }
 
+    /// A control change event.
+    pub fn control_change(frame: u32, channel: u8, controller: u8, value: u8) -> Self {
+        Self::from_bytes(frame, &[0xB0 | (channel & 0x0F), controller & 0x7F, value & 0x7F])
+    }
+
     /// Decodes the event.
     pub fn message(&self) -> MidiMessage {
         if self.len < 2 {

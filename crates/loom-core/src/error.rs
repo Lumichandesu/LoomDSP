@@ -1,4 +1,5 @@
 use crate::graph::{AssignmentId, ModuleId};
+use crate::midi_map::MidiControl;
 use crate::telemetry::ProbeId;
 use crate::transport::TimeSignature;
 
@@ -54,6 +55,9 @@ pub enum LoomError {
         /// The parameter name or index.
         param: String,
     },
+    /// A MIDI channel or controller number is out of range.
+    #[error("invalid MIDI control: channel {} and controller {} (channels are 0 to 15, controllers 0 to 127)", .0.channel, .0.controller)]
+    InvalidMidiControl(MidiControl),
     /// The patch has more modules than the engine was configured for.
     #[error("too many modules (limit is {0})")]
     TooManyModules(usize),
