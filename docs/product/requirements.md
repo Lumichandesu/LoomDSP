@@ -73,7 +73,7 @@ The first library should be small and composable. Phase 1 needs enough to build 
 
 | ID | Requirement | Priority | Phase | Rationale |
 |---|---|---|---|---|
-| FR-LIB-01 | Phase: phase generator, phase scaler, phase wrap/fold, phase reset. | Must | P1 | Core of the phase-driven model. |
+| FR-LIB-01 | Phase: phase generator, phase scaler, phase wrap/fold. Phase reset (MT-PHASE-04) comes in P2. | Must | P1 | Core of the phase-driven model. The tutorial does not need phase reset, so it waits for P2 (#155). |
 | FR-LIB-02 | Oscillators/shapers: sine, saw, pulse, triangle (band-limited), wavetable reader, noise. | Must | P1 | Basic sound sources. |
 | FR-LIB-03 | Filters: state variable filter (LP/HP/BP/notch), one-pole, ladder-style lowpass. | Must | P1 | Basic subtractive synthesis. |
 | FR-LIB-04 | Envelopes and LFOs: ADSR, AD, LFO (phase driven), sample and hold, slew. | Must | P1 | Basic modulation. |
