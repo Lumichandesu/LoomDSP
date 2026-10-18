@@ -77,7 +77,7 @@ The first library should be small and composable. Phase 1 needs enough to build 
 | FR-LIB-02 | Oscillators/shapers: sine, saw, pulse, triangle (band-limited), wavetable reader, noise. | Must | P1 | Basic sound sources. |
 | FR-LIB-03 | Filters: state variable filter (LP/HP/BP/notch), one-pole, ladder-style lowpass. | Must | P1 | Basic subtractive synthesis. |
 | FR-LIB-04 | Envelopes and LFOs: ADSR, AD, LFO (phase driven), sample and hold, slew. | Must | P1 | Basic modulation. |
-| FR-LIB-05 | Math and logic: add, multiply, mix, crossfade, clamp, scale/offset, compare, AND/OR/NOT, flip-flop, counter. | Must | P1 | Building blocks for anything else. |
+| FR-LIB-05 | Math and logic: add, multiply, mix, crossfade, clamp, scale/offset, compare, AND/OR/NOT, flip-flop. The counter is in FR-LIB-22 (P3). | Must | P1 | Building blocks for anything else. |
 | FR-LIB-06 | Delay and time: one-sample delay, delay line with interpolation, allpass. | Must | P1 | Needed for feedback, effects, and physical models. |
 | FR-LIB-07 | I/O: audio in/out, MIDI note/CC/pitch bend, transport and clock (tempo, position; see FR-LIB-25 to 27). | Must | P1 | Connects the patch to the outside world. |
 | FR-LIB-08 | Sequencing: step sequencer, Euclidean generator. (Clock Divide is FR-LIB-27.) | Should | P2 | Common in performance patches. |
