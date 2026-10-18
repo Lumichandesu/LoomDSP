@@ -1895,6 +1895,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "iced",
+ "iced_runtime",
  "loom-canvas",
  "loom-core",
  "loom-host-desktop",

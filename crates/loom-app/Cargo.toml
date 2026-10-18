@@ -27,3 +27,6 @@ rfd.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+iced_runtime = "0.14"

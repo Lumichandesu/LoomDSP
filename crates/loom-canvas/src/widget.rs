@@ -38,6 +38,34 @@ const CABLE_OPACITY: f32 = 0.4;
 /// A gesture on the canvas. The application applies it to its model.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CanvasEvent {
+    /// SPIKE #186: an output is being dragged. `start` is the port and `at`
+    /// the pointer, both in window coordinates. `at` is None when Iced has no
+    /// cursor position (after CursorLeft).
+    AssignDrag {
+        /// The output.
+        from: PortRef,
+        /// The port, in window coordinates.
+        start: Point,
+        /// The pointer, in window coordinates.
+        at: Option<Point>,
+    },
+    /// SPIKE #186: the drag was released somewhere that is not a port.
+    AssignDrop {
+        /// The output.
+        from: PortRef,
+        /// The pointer, in window coordinates.
+        at: Option<Point>,
+    },
+    /// SPIKE #186: the drag ended without a drop (Escape, focus lost).
+    AssignCancel,
+    /// SPIKE #186: test hook, sent on every redraw, so a headless test can
+    /// find a port in window coordinates.
+    SpikeView {
+        /// The canvas bounds in the window.
+        bounds: Rectangle,
+        /// The camera.
+        camera: crate::Camera,
+    },
     /// Replace the selection.
     Select(Vec<u32>),
     /// Move modules by a world offset (always whole grid steps).
@@ -541,6 +569,10 @@ impl<Message> PatchCanvas<'_, Message> {
 
         match event {
             Event::Window(window::Event::RedrawRequested(now)) => {
+                let spike = CanvasEvent::SpikeView {
+                    bounds,
+                    camera: state.camera,
+                };
                 if state
                     .browser_key
                     .replace(self.browser_key)
@@ -574,9 +606,20 @@ impl<Message> PatchCanvas<'_, Message> {
                     state.reported_lights = Some(lights.clone());
                     self.emit(shell, CanvasEvent::VisibleDisplays(lights));
                 }
+                self.emit(shell, spike);
             }
             Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
                 state.modifiers = *modifiers;
+            }
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key: keyboard::Key::Named(keyboard::key::Named::Escape),
+                ..
+            }) if matches!(state.interaction, Interaction::Wiring { .. }) => {
+                eprintln!("SPIKE canvas: Escape while wiring, over canvas {over}");
+                self.end_gestures(state, shell);
+                self.emit(shell, CanvasEvent::AssignCancel);
+                shell.request_redraw();
+                shell.capture_event();
             }
             Event::Keyboard(keyboard::Event::KeyPressed {
                 key, modifiers, repeat, ..
@@ -699,7 +742,21 @@ impl<Message> PatchCanvas<'_, Message> {
                         }
                     }
                     Interaction::Holding { .. } | Interaction::Idle => {}
-                    Interaction::Wiring { .. } => redraw = true,
+                    Interaction::Wiring { from } => {
+                        redraw = true;
+                        if from.output
+                            && let Some(port) = self.scene.port_position(*from)
+                        {
+                            let p = state.camera.to_screen(port);
+                            let start = Point::new(p.x + bounds.x, p.y + bounds.y);
+                            let event = CanvasEvent::AssignDrag {
+                                from: *from,
+                                start,
+                                at: cursor.position(),
+                            };
+                            self.emit(shell, event);
+                        }
+                    }
                     Interaction::Selecting { current, .. } => {
                         *current = world;
                         redraw = true;
@@ -728,7 +785,21 @@ impl<Message> PatchCanvas<'_, Message> {
                 let world = screen.map(|s| state.camera.to_world(s));
                 match interaction {
                     Interaction::Wiring { from } => {
-                        if let Some(Hit::Port(to)) = world.map(|w| self.scene.hit(w, state.hit_radius())) {
+                        let hit = world.map(|w| self.scene.hit(w, state.hit_radius()));
+                        eprintln!(
+                            "SPIKE canvas: release {button:?} while wiring, cursor {:?}, over canvas {over}",
+                            cursor.position()
+                        );
+                        if from.output && !matches!(hit, Some(Hit::Port(_))) {
+                            self.emit(
+                                shell,
+                                CanvasEvent::AssignDrop {
+                                    from,
+                                    at: cursor.position(),
+                                },
+                            );
+                        }
+                        if let Some(Hit::Port(to)) = hit {
                             let pair = if from.output { (from, to) } else { (to, from) };
                             if pair.0.output && !pair.1.output {
                                 self.emit(
@@ -780,12 +851,20 @@ impl<Message> PatchCanvas<'_, Message> {
                 shell.request_redraw();
             }
             Event::Mouse(mouse::Event::CursorLeft) => {
+                eprintln!("SPIKE canvas: CursorLeft, interaction {:?}", state.interaction);
                 self.release_pointer_hold(state, shell);
                 if state.hover.take().is_some() {
                     shell.request_redraw();
                 }
             }
+            Event::Mouse(mouse::Event::CursorEntered) => {
+                eprintln!("SPIKE canvas: CursorEntered, interaction {:?}", state.interaction);
+            }
             Event::Window(window::Event::Unfocused) => {
+                if matches!(state.interaction, Interaction::Wiring { .. }) {
+                    eprintln!("SPIKE canvas: Unfocused while wiring");
+                    self.emit(shell, CanvasEvent::AssignCancel);
+                }
                 // A key release never arrives if the window loses focus
                 // while Space or Enter is held. End every hold here.
                 self.release_pointer_hold(state, shell);

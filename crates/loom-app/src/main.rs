@@ -15,6 +15,7 @@ mod modulation;
 mod monitor;
 mod param;
 mod scene;
+mod spike_line;
 mod undo;
 
 use clap::Parser;
@@ -66,6 +67,9 @@ fn main() -> iced::Result {
 #[derive(Debug, Clone)]
 enum Message {
     Canvas(CanvasEvent),
+    /// SPIKE #186: the pointer entered or left an inspector parameter row.
+    RowEnter(u32, usize),
+    RowExit(u32, usize),
     Param {
         module: u32,
         index: usize,
@@ -190,6 +194,11 @@ struct App {
     /// Parameters this app set during the edit in progress. A change on a
     /// mapped parameter is part of the step only if it is listed here.
     touched: BTreeSet<(u32, usize)>,
+    /// SPIKE #186: the output being dragged, its port, and the pointer, in
+    /// window coordinates.
+    assign_drag: Option<(loom_canvas::PortRef, Point, Option<Point>)>,
+    /// SPIKE #186: the inspector row under the pointer, from mouse_area.
+    drop_row: Option<(u32, usize)>,
 }
 
 /// Where a patch comes from.
@@ -329,6 +338,8 @@ impl App {
         let mut values = PanelValues::new();
         scene::update_panel_values(&mut values, &controller, &BTreeMap::new());
         let mut app = Self {
+            assign_drag: None,
+            drop_row: None,
             controller,
             positions,
             scene,
@@ -1003,6 +1014,22 @@ impl App {
             Message::Browser(_) => {}
             Message::Key(_) if self.browser.is_some() => {}
             Message::Canvas(event) => self.canvas_event(event),
+            Message::RowEnter(module, index) => {
+                eprintln!(
+                    "SPIKE app: row enter #{module}:{index}, dragging {}",
+                    self.assign_drag.is_some()
+                );
+                self.drop_row = Some((module, index));
+            }
+            Message::RowExit(module, index) => {
+                eprintln!(
+                    "SPIKE app: row exit #{module}:{index}, dragging {}",
+                    self.assign_drag.is_some()
+                );
+                if self.drop_row == Some((module, index)) {
+                    self.drop_row = None;
+                }
+            }
             Message::Param {
                 module,
                 index,
@@ -1158,6 +1185,33 @@ impl App {
 
     fn apply_canvas_event(&mut self, event: CanvasEvent) {
         match event {
+            CanvasEvent::AssignDrag { from, start, at } => {
+                if self.assign_drag.is_none() {
+                    eprintln!("SPIKE app: drag start from {from:?}");
+                }
+                if at.is_none() {
+                    eprintln!("SPIKE app: drag move with no cursor position");
+                }
+                self.assign_drag = Some((from, start, at));
+            }
+            CanvasEvent::AssignDrop { from, at } => {
+                match self.drop_row {
+                    Some((module, index)) => {
+                        eprintln!("SPIKE app: DROP {from:?} on #{module} param {index} at {at:?}");
+                        self.status = format!(
+                            "Spike: would assign output {} to #{module} parameter {index}",
+                            from.index
+                        );
+                    }
+                    None => eprintln!("SPIKE app: drop on nothing at {at:?}"),
+                }
+                self.assign_drag = None;
+            }
+            CanvasEvent::SpikeView { .. } => {}
+            CanvasEvent::AssignCancel => {
+                eprintln!("SPIKE app: cancel");
+                self.assign_drag = None;
+            }
             CanvasEvent::GestureStart => {
                 self.close_slider_gesture();
                 self.gesture = true;
@@ -1283,6 +1337,9 @@ impl App {
         // Always a stack, so opening the browser keeps the canvas's state
         // (its camera) in the same place in the widget tree.
         let mut layers = stack![main];
+        if let Some((_, start, Some(end))) = self.assign_drag {
+            layers = layers.push(spike_line::DragLine { start, end });
+        }
         if let Some(open) = &self.browser {
             let outside = mouse_area(space().width(Length::Fill).height(Length::Fill))
                 .on_press(Message::Browser(browser::Message::Close));
@@ -1434,7 +1491,28 @@ impl App {
                                 .align_y(iced::Alignment::Center),
                             );
                         }
-                        items = items.push(row_items);
+                        // SPIKE #186: the app learns which row the pointer
+                        // is over, and highlights it during a drag.
+                        let lit = self.assign_drag.is_some() && self.drop_row == Some((id, index));
+                        let boxed = container(row_items).padding(2).style(move |_| {
+                            if lit {
+                                container::Style::default()
+                                    .background(Color::from_rgba(0.95, 0.6, 0.2, 0.25))
+                                    .border(
+                                        iced::Border::default()
+                                            .rounded(4)
+                                            .width(1)
+                                            .color(Color::from_rgb(0.95, 0.6, 0.2)),
+                                    )
+                            } else {
+                                container::Style::default()
+                            }
+                        });
+                        items = items.push(
+                            mouse_area(boxed)
+                                .on_enter(Message::RowEnter(id, index))
+                                .on_exit(Message::RowExit(id, index)),
+                        );
                     }
                     items.into()
                 }
@@ -1702,5 +1780,246 @@ mod tests {
             repeat: false,
         }));
         assert_eq!(app.controller.graph().nodes().count(), before + 1);
+    }
+}
+
+/// SPIKE #186: drives the real app view headlessly, the way the Iced runtime
+/// does: build the UI, feed events with a cursor, apply the messages, and
+/// rebuild. It checks Iced's widget routing only. What winit and macOS
+/// deliver outside the window is not covered here.
+#[cfg(test)]
+mod spike_186 {
+    use super::*;
+    use iced::advanced::clipboard;
+    use iced::advanced::renderer::{Headless, Style};
+    use iced::{Event, Size, mouse, window};
+    use iced_runtime::user_interface::{Cache, UserInterface};
+    use loom_canvas::PortRef;
+
+    const SIZE: Size = Size::new(1440.0, 900.0);
+
+    struct Harness {
+        app: App,
+        renderer: iced::Renderer,
+        cache: Option<Cache>,
+        log: Vec<String>,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            let app = App::new(Args {
+                patch: Some(PathBuf::from("../../examples/patches/subtractive.ron")),
+                generate: None,
+                no_audio: true,
+                bench: false,
+            });
+            let renderer = iced_runtime::futures::futures::executor::block_on(<iced::Renderer as Headless>::new(
+                iced::Font::DEFAULT,
+                iced::Pixels(16.0),
+                None,
+            ))
+            .expect("headless renderer");
+            Harness {
+                app,
+                renderer,
+                cache: Some(Cache::default()),
+                log: Vec::new(),
+            }
+        }
+
+        /// One runtime cycle: events in, messages applied, then a draw.
+        fn step(&mut self, events: &[Event], cursor: mouse::Cursor) -> Vec<Message> {
+            let mut messages = Vec::new();
+            {
+                let view = self.app.view();
+                let mut ui = UserInterface::build(view, SIZE, self.cache.take().unwrap(), &mut self.renderer);
+                let _ = ui.update(events, cursor, &mut self.renderer, &mut clipboard::Null, &mut messages);
+                self.cache = Some(ui.into_cache());
+            }
+            for m in &messages {
+                match m {
+                    Message::Canvas(CanvasEvent::SpikeView { .. } | CanvasEvent::VisibleDisplays(_)) => {}
+                    other => self.log.push(format!("{cursor:?} -> {other:?}")),
+                }
+                let _ = self.app.update(m.clone());
+            }
+            // Draw too, so the overlay line and the row highlight are built.
+            let view = self.app.view();
+            let mut ui = UserInterface::build(view, SIZE, self.cache.take().unwrap(), &mut self.renderer);
+            ui.draw(
+                &mut self.renderer,
+                &self.app.theme,
+                &Style {
+                    text_color: Color::WHITE,
+                },
+                cursor,
+            );
+            self.cache = Some(ui.into_cache());
+            messages
+        }
+
+        fn at(p: Point) -> mouse::Cursor {
+            mouse::Cursor::Available(p)
+        }
+
+        fn move_to(&mut self, p: Point) -> Vec<Message> {
+            self.step(&[Event::Mouse(mouse::Event::CursorMoved { position: p })], Self::at(p))
+        }
+
+        /// The source port, ADSR #5 output 0, in window coordinates.
+        fn source(&mut self) -> Point {
+            let redraw = Event::Window(window::Event::RedrawRequested(Instant::now()));
+            let mut found = None;
+            for _ in 0..3 {
+                for m in self.step(std::slice::from_ref(&redraw), mouse::Cursor::Unavailable) {
+                    if let Message::Canvas(CanvasEvent::SpikeView { bounds, camera }) = m {
+                        found = Some((bounds, camera));
+                    }
+                }
+            }
+            let (bounds, camera) = found.expect("canvas reports its view");
+            let world = self
+                .app
+                .scene
+                .port_position(PortRef {
+                    module: 5,
+                    output: true,
+                    index: 0,
+                })
+                .unwrap();
+            let s = camera.to_screen(world);
+            Point::new(bounds.x + s.x, bounds.y + s.y)
+        }
+
+        fn drags(messages: &[Message]) -> Vec<Option<Point>> {
+            messages
+                .iter()
+                .filter_map(|m| match m {
+                    Message::Canvas(CanvasEvent::AssignDrag { at, .. }) => Some(*at),
+                    _ => None,
+                })
+                .collect()
+        }
+    }
+
+    /// Selects SVF #4, presses on the ADSR output, and sweeps the pointer
+    /// down the inspector. Returns the y of the first row the app saw.
+    fn start_drag(h: &mut Harness) -> (Point, f32) {
+        let _ = h.app.update(Message::Canvas(CanvasEvent::Select(vec![4])));
+        let port = h.source();
+        h.move_to(port);
+        h.step(
+            &[Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))],
+            Harness::at(port),
+        );
+        assert!(h.app.assign_drag.is_none(), "no drag before the pointer moves");
+        let x = SIZE.width - 140.0;
+        let mut first_row = None;
+        for i in 0..=60 {
+            let p = Point::new(port.x + (x - port.x) * (i as f32 / 60.0), port.y);
+            let out = h.move_to(p);
+            let drag = Harness::drags(&out);
+            assert_eq!(drag, vec![Some(p)], "the canvas reports every move, at {p:?}");
+        }
+        for y in (0..SIZE.height as i32).step_by(4) {
+            h.move_to(Point::new(x, y as f32));
+            if first_row.is_none() && h.app.drop_row.is_some() {
+                first_row = Some(y as f32);
+            }
+        }
+        (
+            port,
+            first_row.expect("the app saw a row while the canvas owned the drag"),
+        )
+    }
+
+    #[test]
+    fn drop_on_a_row() {
+        let mut h = Harness::new();
+        let (_, y) = start_drag(&mut h);
+        let x = SIZE.width - 140.0;
+        h.move_to(Point::new(x, y + 2.0));
+        let row = h.app.drop_row;
+        assert!(row.is_some_and(|(m, _)| m == 4));
+        let lit = h.app.assign_drag.is_some();
+        assert!(lit, "the row would be highlighted");
+        let out = h.step(
+            &[Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))],
+            Harness::at(Point::new(x, y + 2.0)),
+        );
+        assert!(
+            out.iter()
+                .any(|m| matches!(m, Message::Canvas(CanvasEvent::AssignDrop { .. }))),
+            "release over the inspector reaches the canvas"
+        );
+        assert!(h.app.status.starts_with("Spike: would assign"), "{}", h.app.status);
+        assert!(h.app.assign_drag.is_none());
+        // Mid sweep log, for the report.
+        let enters: Vec<_> = h.log.iter().filter(|l| l.contains("Row")).take(6).collect();
+        eprintln!("row messages: {enters:#?}");
+        eprintln!("dropped on {row:?}");
+    }
+
+    #[test]
+    fn escape_cancels() {
+        let mut h = Harness::new();
+        let (_, y) = start_drag(&mut h);
+        let x = SIZE.width - 140.0;
+        h.move_to(Point::new(x, y + 2.0));
+        let key = iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape);
+        let esc = Event::Keyboard(iced::keyboard::Event::KeyPressed {
+            modified_key: key.clone(),
+            key,
+            physical_key: iced::keyboard::key::Physical::Code(iced::keyboard::key::Code::Escape),
+            location: iced::keyboard::Location::Standard,
+            modifiers: iced::keyboard::Modifiers::default(),
+            text: None,
+            repeat: false,
+        });
+        let out = h.step(&[esc], Harness::at(Point::new(x, y + 2.0)));
+        assert!(
+            out.iter()
+                .any(|m| matches!(m, Message::Canvas(CanvasEvent::AssignCancel)))
+        );
+        assert!(h.app.assign_drag.is_none());
+        let out = h.step(
+            &[Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))],
+            Harness::at(Point::new(x, y + 2.0)),
+        );
+        assert!(
+            !out.iter()
+                .any(|m| matches!(m, Message::Canvas(CanvasEvent::AssignDrop { .. }))),
+            "{out:?}"
+        );
+        assert!(!h.app.status.starts_with("Spike"));
+    }
+
+    /// What winit sends when the pointer leaves the window with the button
+    /// held: CursorLeft (Iced then has no cursor), then, on macOS, moves at
+    /// positions outside the window, then the release.
+    #[test]
+    fn release_outside_the_window() {
+        let mut h = Harness::new();
+        let (_, y) = start_drag(&mut h);
+        let x = SIZE.width - 140.0;
+        h.move_to(Point::new(x, y + 2.0));
+        assert!(h.app.drop_row.is_some());
+        let out = h.step(&[Event::Mouse(mouse::Event::CursorLeft)], mouse::Cursor::Unavailable);
+        eprintln!("after CursorLeft: {out:?}, drop_row {:?}", h.app.drop_row);
+        let outside = Point::new(SIZE.width + 60.0, y);
+        let out = h.move_to(outside);
+        eprintln!("move outside: {out:?}, drop_row {:?}", h.app.drop_row);
+        assert_eq!(Harness::drags(&out), vec![Some(outside)]);
+        assert!(h.app.drop_row.is_none(), "the row exits when the pointer leaves");
+        let out = h.step(
+            &[Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))],
+            Harness::at(outside),
+        );
+        assert!(
+            out.iter()
+                .any(|m| matches!(m, Message::Canvas(CanvasEvent::AssignDrop { .. })))
+        );
+        assert!(!h.app.status.starts_with("Spike"), "a drop outside does nothing");
+        assert!(h.app.assign_drag.is_none());
     }
 }
