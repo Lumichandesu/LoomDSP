@@ -3,10 +3,10 @@
 How any output modulates any parameter without a cable, and how users make, see, and edit those assignments.
 
 - **Kind:** living specification.
-- **Status:** Editing and display [slice 1](#slice-1-make-see-and-edit) (make, see, and edit) and its [undo rules](#undo) are Agreed ([#70](https://github.com/brylie/LoomDSP/issues/70), [#20](https://github.com/brylie/LoomDSP/issues/20)). Slices 2 and 3 (live value, hover lines, matrix) are Draft ([#20](https://github.com/brylie/LoomDSP/issues/20), [#71](https://github.com/brylie/LoomDSP/issues/71)). The [engine rules](#rules), [engine and API](#engine-and-api), and [engine acceptance criteria](#acceptance-criteria-engine) are Agreed and built ([#19](https://github.com/brylie/LoomDSP/issues/19)). [Parameter mapping](#parameter-mapping) is Agreed.
+- **Status:** Editing and display [slice 1](#slice-1-make-see-and-edit) (make, see, and edit) and its [undo rules](#undo) are Agreed ([#70](https://github.com/brylie/LoomDSP/issues/70), [#20](https://github.com/brylie/LoomDSP/issues/20)). Slices 2 and 3 (live value, hover lines, matrix) are Draft ([#172](https://github.com/brylie/LoomDSP/issues/172), [#71](https://github.com/brylie/LoomDSP/issues/71)). The [engine rules](#rules), [engine and API](#engine-and-api), and [engine acceptance criteria](#acceptance-criteria-engine) are Agreed and built ([#19](https://github.com/brylie/LoomDSP/issues/19)). [Parameter mapping](#parameter-mapping) is Agreed.
 - **Decision behind it:** [ADR-0014](../adr/0014-modulation-without-cables.md) (modulation without cables). Builds on [ADR-0013](../adr/0013-modules-carry-their-own-panel.md) (panels) and [ADR-0007](../adr/0007-polymorphic-signal-model.md) (signals).
 - **Requirements:** FR-MOD-01 to FR-MOD-08, FR-LIB-12.
-- **Issues:** [#19](https://github.com/brylie/LoomDSP/issues/19) (built-in modulation), [#20](https://github.com/brylie/LoomDSP/issues/20) (modulation range on controls), [#66](https://github.com/brylie/LoomDSP/issues/66) (parameter mapping), [#70](https://github.com/brylie/LoomDSP/issues/70) (making and seeing assignments), [#71](https://github.com/brylie/LoomDSP/issues/71) (matrix), [#12](https://github.com/brylie/LoomDSP/issues/12) (undo).
+- **Issues:** [#19](https://github.com/brylie/LoomDSP/issues/19) (built-in modulation), [#20](https://github.com/brylie/LoomDSP/issues/20) (range arcs and dots), [#66](https://github.com/brylie/LoomDSP/issues/66) (parameter mapping), [#70](https://github.com/brylie/LoomDSP/issues/70) (making and editing assignments), [#71](https://github.com/brylie/LoomDSP/issues/71) (matrix), [#151](https://github.com/brylie/LoomDSP/issues/151) and [#172](https://github.com/brylie/LoomDSP/issues/172) (slice 2), [#12](https://github.com/brylie/LoomDSP/issues/12) (undo).
 
 ## Goal
 
@@ -27,8 +27,8 @@ The editing and display work ships in three slices, so each one can be built and
 
 | Slice | What it adds | Status | Issues |
 |---|---|---|---|
-| 1. Make, see, and edit | Drag an output onto a tile control, add from the inspector, edit in the inspector, see what each output drives in the inspector, a range arc on tile knobs, a badge on the source | **Agreed** | [#70](https://github.com/brylie/LoomDSP/issues/70), [#20](https://github.com/brylie/LoomDSP/issues/20) (range part) |
-| 2. Live value and lines | The live value dot, lines on hover and pinned from the badge, dragging an arc to change depth | Draft | [#20](https://github.com/brylie/LoomDSP/issues/20) (live part), [#70](https://github.com/brylie/LoomDSP/issues/70) |
+| 1. Make, see, and edit | Drag an output onto a tile control, add from the inspector, edit in the inspector, see what each output drives in the inspector, a range arc on tile knobs, a badge on the source | **Agreed** | [#70](https://github.com/brylie/LoomDSP/issues/70) (making and editing), [#20](https://github.com/brylie/LoomDSP/issues/20) (arcs and dots) |
+| 2. Live value and lines | The live value dot, lines on hover and pinned from the badge, dragging an arc to change depth | Draft | [#172](https://github.com/brylie/LoomDSP/issues/172), decided in [#151](https://github.com/brylie/LoomDSP/issues/151) |
 | 3. Matrix | The modulation matrix, with the keyboard path | Draft | [#71](https://github.com/brylie/LoomDSP/issues/71) |
 
 *Why slices:* slice 1 needs no engine change and no new kind of canvas drawing. Its range arcs, modulation dots (on toggles, radio buttons, and knobs whose arc has zero length or whose assignments are all off), and count badges use the arcs, round markers, and labels the canvas already draws. The live dot needs the engine to publish modulated values, and the matrix is a new panel. Neither should hold back the first way to make a patch with modulation.
@@ -213,7 +213,7 @@ A **Macro** module (FR-LIB-12) has one knob on its panel and one output equal to
 
 ### Acceptance criteria: slice 1
 
-**Status:** Agreed. [#70](https://github.com/brylie/LoomDSP/issues/70) and [#20](https://github.com/brylie/LoomDSP/issues/20) (range part).
+**Status:** Agreed. [#70](https://github.com/brylie/LoomDSP/issues/70), and [#20](https://github.com/brylie/LoomDSP/issues/20) for the arc and dot criteria.
 
 - [ ] Dragging an output onto a tile control creates an assignment that follows the source's polarity, with depth 0.25 on a continuous parameter. Dropping on an input port still makes a cable.
 - [ ] A drop on a toggle gives depth 1, and on a radio button with 3 options depth 0.5. With the toggle off, a unipolar source at 1 turns it on (test).
@@ -231,7 +231,7 @@ A **Macro** module (FR-LIB-12) has one knob on its panel and one output equal to
 
 ### Acceptance criteria: slices 2 and 3
 
-**Status:** Draft. [#20](https://github.com/brylie/LoomDSP/issues/20), [#70](https://github.com/brylie/LoomDSP/issues/70), [#71](https://github.com/brylie/LoomDSP/issues/71).
+**Status:** Draft. [#172](https://github.com/brylie/LoomDSP/issues/172), [#71](https://github.com/brylie/LoomDSP/issues/71).
 
 - [ ] Modulated knobs show the live value.
 - [ ] Hovering an output port, its badge, or a modulated control draws the lines. Clicking the badge pins them until it is clicked again or Escape is pressed.
