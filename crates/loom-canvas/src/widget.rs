@@ -681,6 +681,8 @@ impl<Message> PatchCanvas<'_, Message> {
             }
             Event::Mouse(mouse::Event::ButtonPressed(button)) if over => {
                 let Some(screen) = screen else { return };
+                let hit = self.scene.hit(state.camera.to_world(screen), state.hit_radius());
+                eprintln!("SPIKE canvas: press {button:?} at {:?}, hit {hit:?}", cursor.position());
                 // A second button must end a hold. Replacing the interaction
                 // without a release would leave a momentary gate high.
                 self.release_pointer_hold(state, shell);
