@@ -45,7 +45,7 @@ Timing is phase-driven: a ramp from 0 to 1 sets where in a cycle a module is ([P
 | MT-PHASE-01 | Phasor | A rising 0 to 1 ramp at a set rate or musical division. | Timebase, Retrigger | P1 | FR-LIB-01 | Built in part (`loom.phase.generator`: rate set by pitch; musical divisions to come) |
 | MT-PHASE-02 | Phase scale | Runs a phase faster or slower by a whole-number ratio, and stays locked to it. | | P1 | FR-LIB-27 | Specified (`loom.phase.scale`) |
 | MT-PHASE-03 | Phase trigger | Fires a trigger each time a phase wraps. | | P1 | FR-LIB-27 | Built (`loom.phase.trigger`) |
-| MT-PHASE-04 | Phase reset | Restarts a phase at zero on a trigger. | | P1 | FR-LIB-01 | Planned |
+| MT-PHASE-04 | Phase reset | Restarts a phase at zero on a trigger. | | P2 | FR-LIB-01 | Planned |
 | MT-PHASE-05 | Phase warp | Changes how a phase moves within each cycle without changing its period: offset, bend, S-curve, skew, reverse, mirror, and smoothing that keeps the wrap point. | | P2 | FR-LIB-01 | Planned |
 | MT-PHASE-06 | Phase split | Divides one cycle into N parts and outputs a phase for each part. | | P3 | New | Planned |
 | MT-PHASE-08 | Phase wrap and fold | Brings any signal into the 0 to 1 phase range, by wrapping it around or by folding it back at the edges. | | P1 | FR-LIB-01 | Planned |
@@ -120,7 +120,8 @@ Modulation assignments already scale and offset any parameter (ADR-0014), so the
 | MT-LEVEL-02 | Amplifier | Scales a signal by a control signal, with linear or exponential response. | | P1 | FR-LIB-05 | Planned |
 | MT-LEVEL-03 | Scale | Multiplies by a factor from -1 to +1 (so it can invert) and adds an offset, or maps one range onto another, including bipolar to unipolar and back. | | P1 | FR-LIB-05 | Planned |
 | MT-LEVEL-04 | Slew | Limits how fast a signal can rise or fall, with separate times for each direction. | | P1 | FR-LIB-04 | Planned |
-| MT-MIX-01 | Mixer | Sums several inputs, with level, pan, and mute per channel. At unity gain it is a quick merge. | | P1 | FR-LIB-05 | Planned |
+| MT-LEVEL-05 | Clamp | Keeps a signal between a lower and an upper limit. | | P1 | FR-LIB-05 | Planned |
+| MT-MIX-01 | Mixer | Sums several inputs, with level, pan, and mute per channel. At unity gain it is a quick merge. P1 builds level and mute. Pan comes later, with stereo signals. | | P1 | FR-LIB-05 | Planned |
 | MT-MIX-02 | Crossfade | Blends two signals by a control, with an equal-power or linear law. | | P1 | FR-LIB-05 | Planned |
 | MT-MIX-03 | Stereo tool | Pans, sets width, converts between left/right and mid/side, and splits or joins channels. | | P2 | New | Planned |
 | MT-ROUTE-01 | Selector | Picks one of N inputs. It steps to the next on a trigger, jumps to the input a control value points at, or picks at random. | Seed, Smoothing | P2 | New | Planned |
@@ -170,7 +171,7 @@ All random modules take a seed, so a patch sounds the same each time it loads (N
 | MT-MATH-02 | Function | Applies one chosen function: power, root, exponential, logarithm, rounding, absolute value and sign, minimum, maximum, mean, or trigonometry. The tile shows the symbol. | | P2 | New | Planned |
 | MT-MATH-03 | Convert | Converts between units: linear and decibels, frequency and pitch. | | P1 | FR-SIG-05 | Planned |
 | MT-MATH-04 | Expression | Evaluates a short typed formula on its inputs. The formula is data, parsed and checked when the patch loads, never run as code (vision, principle 7). | | P4 | New | Planned |
-| MT-LOGIC-01 | Compare | Outputs a gate when one signal is above, below, or equal to another, inside a window, or on a rising or falling edge. | | P1 | FR-LIB-05 | Planned |
+| MT-LOGIC-01 | Compare | Outputs a gate when one signal is above, below, or equal to another, inside a window, or on a rising or falling edge. P1 builds above and below. The other modes come later. | | P1 | FR-LIB-05 | Planned |
 | MT-LOGIC-02 | Logic | AND, OR, NOT, XOR, and their inverses, on two or more gates. | | P1 | FR-LIB-05 | Planned |
 | MT-LOGIC-03 | Memory | Stores a gate state: set and reset, toggle, data on a clock, and a latch that cycles through N states. | | P1 | FR-LIB-05 | Planned |
 | MT-LOGIC-04 | Counter | Counts triggers from 0 to N-1, outputs the count as a phase, and fires when it wraps. Covers countdowns and "after N times". | | P3 | FR-LIB-22 | Specified |
@@ -352,9 +353,9 @@ A user's own sub-patch can declare a role and then fill any matching slot (FR-EN
 |---|---|---|
 | P0 | 3 | 0 |
 | P1 | 34 | 0 |
-| P2 | 55 | 16 |
+| P2 | 56 | 16 |
 | P3 | 32 | 13 |
 | P4 | 46 | 30 |
-| **Total** | **170** | **59** |
+| **Total** | **171** | **59** |
 
 Plus 11 traits and 7 initial roles. The summary is counted from the tables above; update it when entries change.
