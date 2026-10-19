@@ -163,6 +163,7 @@ Names (`id`, port and parameter `name`) are stable IDs that patch files store. L
 | Patch loading and round trips | `crates/loom-patch`. |
 | Canvas logic and shaders | `crates/loom-canvas` (hit-testing, camera, geometry, shader validation). |
 | Layout and parameter mapping in the app | `crates/loom-app`. |
+| Pointer and key events reaching the right widget in the app view | `crates/loom-app/src/ui_test.rs`: the headless `Ui` harness sends real events to `App::view`, runs the tasks they return, and finds ports, controls, and text by name. |
 | Engine speed | `cargo bench -p loom-modules`. |
 
 CI runs all of them on Linux, macOS, and Windows. The full list of CI jobs is in CONTRIBUTING.md.

@@ -28,6 +28,11 @@
 //! Subscriptions do not run, except the two key listeners the app uses:
 //! `keyboard::listen` and, while the browser is open, `browser_key`.
 //!
+//! Time is the wall clock, and steps take microseconds. So two clicks on
+//! the same control or on empty canvas in one test count as a double-click
+//! (a control resets, the browser opens). Click something else in between
+//! when a test needs two single clicks.
+//!
 //! Not covered: what the operating system and winit deliver, for example
 //! events while the pointer is outside the window.
 
