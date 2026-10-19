@@ -56,6 +56,8 @@ iced = { version = "0.14", default-features = false, features = [
     "wayland",
 ] }
 iced_wgpu = "0.14"
+# Builds the app view headlessly in loom-app tests (#189). Same version as Iced.
+iced_runtime = "0.14"
 bytemuck = { version = "1", features = ["derive"] }
 # PNG files for `loom-app --screenshot`.
 png = "0.18"

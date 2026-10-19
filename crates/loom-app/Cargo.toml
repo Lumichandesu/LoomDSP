@@ -27,5 +27,8 @@ iced = { workspace = true, features = ["smol"] }
 clap.workspace = true
 rfd.workspace = true
 
+[dev-dependencies]
+iced_runtime.workspace = true
+
 [lints]
 workspace = true

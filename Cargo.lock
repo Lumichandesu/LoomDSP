@@ -1930,6 +1930,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "iced",
+ "iced_runtime",
  "iced_wgpu",
  "loom-canvas",
  "loom-core",

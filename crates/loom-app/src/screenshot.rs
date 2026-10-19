@@ -211,7 +211,7 @@ fn camera(scene: &Scene, size: Size, zoom: Option<f32>, centre: Option<Point>) -
 
 /// The widget index of the control bound to a parameter. Panel widgets on
 /// the canvas keep the descriptor's order.
-fn find_control(controller: &Controller, target: &FocusTarget) -> Result<(u32, usize), String> {
+pub fn find_control(controller: &Controller, target: &FocusTarget) -> Result<(u32, usize), String> {
     let node = controller
         .graph()
         .node(ModuleId(target.module))

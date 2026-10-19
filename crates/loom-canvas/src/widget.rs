@@ -218,6 +218,26 @@ pub struct Still {
     pub focus: Option<(u32, usize)>,
 }
 
+/// Where the canvas is in the window and how it looks at the world. The
+/// canvas reports it to widget operations as custom state, so an operation
+/// can turn a world point (a port, a control) into window coordinates, for
+/// example to send pointer events in a headless test.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CanvasView {
+    /// The canvas bounds in the window.
+    pub bounds: Rectangle,
+    /// The current camera.
+    pub camera: Camera,
+}
+
+impl CanvasView {
+    /// A world point in window coordinates.
+    pub fn to_window(&self, world: Point) -> Point {
+        let s = self.camera.to_screen(world);
+        Point::new(self.bounds.x + s.x, self.bounds.y + s.y)
+    }
+}
+
 impl<'a, Message> PatchCanvas<'a, Message> {
     /// Creates a canvas for a scene and the current selection.
     pub fn new(scene: &'a Scene, selection: &'a BTreeSet<u32>, on_event: impl Fn(CanvasEvent) -> Message + 'a) -> Self {
@@ -520,6 +540,21 @@ where
         let bounds = layout.bounds();
         self.handle(state, event, bounds, cursor, shell);
         self.sync_hover_text(state, event, shell);
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut Tree,
+        layout: Layout<'_>,
+        _renderer: &Renderer,
+        operation: &mut dyn iced::advanced::widget::Operation,
+    ) {
+        let state = tree.state.downcast_ref::<State>();
+        let mut view = CanvasView {
+            bounds: layout.bounds(),
+            camera: state.camera,
+        };
+        operation.custom(None, layout.bounds(), &mut view);
     }
 
     fn mouse_interaction(

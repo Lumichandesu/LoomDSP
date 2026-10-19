@@ -17,6 +17,8 @@ mod monitor;
 mod param;
 mod scene;
 mod screenshot;
+#[cfg(test)]
+mod ui_test;
 mod undo;
 
 use clap::Parser;
