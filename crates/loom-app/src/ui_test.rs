@@ -230,11 +230,19 @@ impl Ui {
     /// The centre of the panel control bound to a parameter, by the
     /// parameter's stable name.
     pub fn control(&mut self, module: u32, param: &str) -> Point {
-        let target = screenshot::FocusTarget {
-            module,
-            param: param.to_string(),
-        };
-        let (_, widget) = screenshot::find_control(&self.app.controller, &target).unwrap_or_else(|e| panic!("{e}"));
+        let node = self
+            .app
+            .controller
+            .graph()
+            .node(ModuleId(module))
+            .expect("module in the patch");
+        let widget = node
+            .descriptor
+            .panel
+            .widgets
+            .iter()
+            .position(|w| w.is_control() && w.bind == param)
+            .unwrap_or_else(|| panic!("module {module} has no control for `{param}`"));
         let rect = self
             .app
             .scene
