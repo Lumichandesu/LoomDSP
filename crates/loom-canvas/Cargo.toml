@@ -21,4 +21,4 @@ workspace = true
 
 [dev-dependencies]
 # Same version as wgpu's own shader translator, to validate canvas.wgsl in tests.
-naga = { version = "27", features = ["wgsl-in", "msl-out"] }
+naga = { version = "30", features = ["wgsl-in", "msl-out"] }
