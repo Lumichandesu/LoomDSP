@@ -315,7 +315,7 @@ fn descriptor(controller: &Controller, module: u32) -> Result<&'static loom_core
 
 /// The widget index of the control bound to a parameter. Panel widgets on
 /// the canvas keep the descriptor's order.
-fn find_control(controller: &Controller, target: &Named) -> Result<(u32, usize), String> {
+pub(crate) fn find_control(controller: &Controller, target: &Named) -> Result<(u32, usize), String> {
     let descriptor = descriptor(controller, target.module)?;
     control_index(descriptor, &target.name)
         .map(|index| (target.module, index))
