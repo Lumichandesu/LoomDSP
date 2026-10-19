@@ -17,20 +17,35 @@
 //! canvas bounds, its camera, and the scene. So a test keeps working when a
 //! tile moves or the inspector gets wider.
 //!
+//! Tasks that `App::update` returns run as the runtime runs them: widget
+//! operations (such as focusing the browser's search field) on the new
+//! view, clipboard reads and writes on an in-memory clipboard, and exit as
+//! [`Ui::exited`]. A message a task produces is applied like any other. A
+//! task the harness cannot run, such as a window command or one that waits
+//! on a timer or a file dialog, panics with a message, so a test never
+//! passes because something was quietly skipped.
+//!
+//! Subscriptions do not run, except the two key listeners the app uses:
+//! `keyboard::listen` and, while the browser is open, `browser_key`.
+//!
 //! Not covered: what the operating system and winit deliver, for example
 //! events while the pointer is outside the window.
 
 use crate::{App, Args, Message, screenshot};
-use iced::advanced::clipboard;
+use iced::advanced::Clipboard;
+use iced::advanced::clipboard::Kind;
 use iced::advanced::renderer::{Headless, Style};
 use iced::advanced::widget::Id;
 use iced::advanced::widget::Operation;
 use iced::advanced::widget::operation::Outcome;
-use iced::{Event, Point, Rectangle, Size, event, keyboard, mouse, window};
+use iced::{Event, Point, Rectangle, Size, Task, event, keyboard, mouse, window};
+use iced_runtime::Action;
+use iced_runtime::futures::futures::{FutureExt, StreamExt};
 use iced_runtime::user_interface::{Cache, UserInterface};
 use loom_canvas::{CanvasView, PortRef};
 use loom_core::{ModuleId, OutputSafety};
 use std::any::Any;
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -43,6 +58,25 @@ pub struct Ui {
     renderer: iced::Renderer,
     cache: Option<Cache>,
     cursor: mouse::Cursor,
+    /// The clipboard, shared by widgets and tasks. One text for both the
+    /// standard and the primary clipboard.
+    pub clipboard: Memory,
+    /// True once a task asked the app to exit.
+    pub exited: bool,
+}
+
+/// An in-memory clipboard.
+#[derive(Debug, Default)]
+pub struct Memory(pub Option<String>);
+
+impl Clipboard for Memory {
+    fn read(&self, _kind: Kind) -> Option<String> {
+        self.0.clone()
+    }
+
+    fn write(&mut self, _kind: Kind, contents: String) {
+        self.0 = Some(contents);
+    }
 }
 
 impl Ui {
@@ -74,6 +108,8 @@ impl Ui {
             renderer,
             cache: Some(Cache::default()),
             cursor: mouse::Cursor::Unavailable,
+            clipboard: Memory::default(),
+            exited: false,
         };
         // The canvas frames the patch on its first redraw.
         ui.redraw();
@@ -81,22 +117,32 @@ impl Ui {
     }
 
     /// One frame: the events go to the view at the current cursor, the
-    /// messages they produce are applied, and the new view is drawn.
-    /// Returns the messages.
+    /// messages they produce are applied, their tasks run, and the new view
+    /// is drawn. Returns every message, including those tasks produced.
     pub fn step(&mut self, events: &[Event]) -> Vec<Message> {
         let mut messages = Vec::new();
+        let browser_open = self.app.browser.is_some();
+        let mut clipboard = std::mem::take(&mut self.clipboard);
         self.with_ui(|ui, renderer, cursor| {
-            let (_, statuses) = ui.update(events, cursor, renderer, &mut clipboard::Null, &mut messages);
-            // The app hears keys through `keyboard::listen`, which passes on
-            // the key events no widget captured. Do the same here.
+            let (_, statuses) = ui.update(events, cursor, renderer, &mut clipboard, &mut messages);
             for (event, status) in events.iter().zip(statuses) {
+                // `keyboard::listen` passes on the key events no widget
+                // captured.
                 if let (Event::Keyboard(key), event::Status::Ignored) = (event, status) {
                     messages.push(Message::Key(key.clone()));
                 }
+                // The open browser listens to keys whether or not a widget
+                // used them.
+                if browser_open && let Some(message) = crate::browser_key(event.clone(), status, window::Id::unique()) {
+                    messages.push(message);
+                }
             }
         });
-        for message in &messages {
-            let _ = self.app.update(message.clone());
+        self.clipboard = clipboard;
+        let mut queue: VecDeque<Message> = messages.iter().cloned().collect();
+        while let Some(message) = queue.pop_front() {
+            let task = self.app.update(message);
+            self.run(task, &mut queue, &mut messages);
         }
         let theme = self.app.theme();
         let style = Style {
@@ -104,6 +150,49 @@ impl Ui {
         };
         self.with_ui(|ui, renderer, cursor| ui.draw(renderer, &theme, &style, cursor));
         messages
+    }
+
+    /// Runs a task to the end. Messages it produces go to `queue` and to
+    /// `log`. Widget operations run on a view built from the app as it is
+    /// now, so they see what the update just changed.
+    fn run(&mut self, task: Task<Message>, queue: &mut VecDeque<Message>, log: &mut Vec<Message>) {
+        let Some(mut stream) = iced_runtime::task::into_stream(task) else {
+            return;
+        };
+        loop {
+            // A stream can return Pending once while its parts hand over,
+            // for example after a clipboard reply. A few polls tell that
+            // apart from a task that waits on the outside world.
+            let polled = (0..8).find_map(|_| stream.next().now_or_never());
+            let action = match polled {
+                Some(Some(action)) => action,
+                Some(None) => return,
+                None => panic!("Ui: a task waits on something the harness cannot give, such as a timer or a dialog"),
+            };
+            match action {
+                Action::Output(message) => {
+                    log.push(message.clone());
+                    queue.push_back(message);
+                }
+                Action::Widget(operation) => {
+                    let mut next = Some(operation);
+                    while let Some(mut operation) = next.take() {
+                        self.with_ui(|ui, renderer, _| ui.operate(renderer, operation.as_mut()));
+                        if let Outcome::Chain(chained) = operation.finish() {
+                            next = Some(chained);
+                        }
+                    }
+                }
+                Action::Clipboard(iced_runtime::clipboard::Action::Read { channel, .. }) => {
+                    let _ = channel.send(self.clipboard.0.clone());
+                }
+                Action::Clipboard(iced_runtime::clipboard::Action::Write { contents, .. }) => {
+                    self.clipboard.0 = Some(contents);
+                }
+                Action::Exit => self.exited = true,
+                other => panic!("Ui: the harness cannot run this task: {other:?}"),
+            }
+        }
     }
 
     /// Builds the view, runs `f` on it, and keeps its cache.
@@ -171,6 +260,33 @@ impl Ui {
             location: keyboard::Location::Standard,
             modifiers,
         })]));
+        messages
+    }
+
+    /// Types text, one key press and release per character, as a keyboard
+    /// does. Only the widget with focus takes it.
+    pub fn typewrite(&mut self, text: &str) -> Vec<Message> {
+        let mut messages = Vec::new();
+        for c in text.chars() {
+            let key = keyboard::Key::Character(c.to_string().into());
+            let physical = keyboard::key::Physical::Unidentified(keyboard::key::NativeCode::Unidentified);
+            messages.extend(self.step(&[Event::Keyboard(keyboard::Event::KeyPressed {
+                key: key.clone(),
+                modified_key: key.clone(),
+                physical_key: physical,
+                location: keyboard::Location::Standard,
+                modifiers: keyboard::Modifiers::default(),
+                text: Some(c.to_string().into()),
+                repeat: false,
+            })]));
+            messages.extend(self.step(&[Event::Keyboard(keyboard::Event::KeyReleased {
+                key: key.clone(),
+                modified_key: key,
+                physical_key: physical,
+                location: keyboard::Location::Standard,
+                modifiers: keyboard::Modifiers::default(),
+            })]));
+        }
         messages
     }
 
@@ -279,6 +395,7 @@ impl Ui {
 
 mod tests {
     use super::*;
+    use loom_canvas::CanvasEvent;
     use loom_core::{InputRef, OutputRef};
 
     fn connected(ui: &Ui, from: (u32, usize), to: (u32, usize)) -> bool {
@@ -325,6 +442,45 @@ mod tests {
         ui.tap(keyboard::Key::Character("z".into()), keyboard::Modifiers::COMMAND);
 
         assert!(!connected(&ui, (8, 0), (9, 1)), "undo removed the cable");
+    }
+
+    /// A over empty canvas opens the browser. Its focus task gives the
+    /// search field focus, so typed text goes there, and Enter adds the
+    /// first match.
+    #[test]
+    fn the_browser_search_field_takes_typing() {
+        let mut ui = Ui::open("subtractive.ron");
+        let modules = ui.app.controller.graph().nodes().count();
+        let canvas = ui.canvas();
+        ui.move_to(Point::new(canvas.bounds.x + 8.0, canvas.bounds.y + 8.0));
+        ui.tap(keyboard::Key::Character("a".into()), keyboard::Modifiers::default());
+        assert!(ui.app.browser.is_some(), "A opens the browser");
+
+        ui.typewrite("svf");
+        ui.tap(
+            keyboard::Key::Named(keyboard::key::Named::Enter),
+            keyboard::Modifiers::default(),
+        );
+
+        assert!(ui.app.browser.is_none(), "Enter adds the match and closes the browser");
+        assert_eq!(ui.app.controller.graph().nodes().count(), modules + 1);
+    }
+
+    /// Copy writes the selected module to the clipboard through a task, and
+    /// paste reads it back through another.
+    #[test]
+    fn copy_and_paste_go_through_the_clipboard() {
+        let mut ui = Ui::open("subtractive.ron");
+        let modules = ui.app.controller.graph().nodes().count();
+        let _ = ui.app.update(Message::Canvas(CanvasEvent::Select(vec![4])));
+        let canvas = ui.canvas();
+        ui.move_to(Point::new(canvas.bounds.x + 8.0, canvas.bounds.y + 8.0));
+
+        ui.tap(keyboard::Key::Character("c".into()), keyboard::Modifiers::COMMAND);
+        assert!(ui.clipboard.0.is_some(), "copy wrote the clipboard");
+        ui.tap(keyboard::Key::Character("v".into()), keyboard::Modifiers::COMMAND);
+
+        assert_eq!(ui.app.controller.graph().nodes().count(), modules + 1);
     }
 
     /// The same drag released on empty canvas makes no cable.
