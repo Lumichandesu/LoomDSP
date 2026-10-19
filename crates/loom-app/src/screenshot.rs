@@ -11,8 +11,8 @@ use iced::advanced::renderer::{Headless, Style};
 use iced::advanced::widget::Tree;
 use iced::advanced::{Layout, layout, mouse};
 use iced::{Color, Element, Font, Pixels, Point, Rectangle, Size, Theme};
-use loom_canvas::{Camera, MAX_ZOOM, MIN_ZOOM, Palette, PanelValues, PatchCanvas, Scene, Still};
-use loom_core::{Controller, ModuleId};
+use loom_canvas::{Camera, MAX_ZOOM, MIN_ZOOM, Palette, PanelValues, PatchCanvas, PortRef, Scene, Still, StillDrag};
+use loom_core::{Controller, ModuleId, OutputRef};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::str::FromStr;
@@ -39,15 +39,42 @@ pub struct Options {
     /// fits in the image.
     #[arg(long, value_name = "ZOOM", value_parser = positive, requires = "screenshot")]
     pub zoom: Option<f32>,
-    /// World point at the centre of the image, as X,Y. Without it, the
+    /// Point at the centre of the image, as X,Y in world units, or as
+    /// MODULE:NAME like --pointer. Without it, the pointer, or else the
     /// centre of the focused module, or else of the patch.
-    #[arg(long, value_name = "X,Y", requires = "screenshot")]
-    pub center: Option<WorldPoint>,
+    #[arg(long, value_name = "X,Y|MODULE:NAME", requires = "screenshot")]
+    pub center: Option<Pointer>,
     /// Give one control keyboard focus, as MODULE:PARAM (for example
     /// 4:cutoff). It draws as after a Tab press: the module selected, the
     /// control with its focus ring and value.
     #[arg(long, value_name = "MODULE:PARAM", requires = "screenshot")]
-    pub focus: Option<FocusTarget>,
+    pub focus: Option<Named>,
+    /// Put the pointer here, as X,Y in world units, or as MODULE:NAME for
+    /// the centre of a control (by parameter) or else a port of that name,
+    /// outputs first. What is under it draws as hovered.
+    #[arg(long, value_name = "X,Y|MODULE:NAME", requires = "screenshot")]
+    pub pointer: Option<Pointer>,
+    /// Show hover text for what is under the pointer, or else for the
+    /// focused control, as after resting there.
+    #[arg(long, requires = "screenshot")]
+    pub hover_text: bool,
+    /// Pin the badge of this output, as MODULE:OUTPUT, as after a click on
+    /// it: its modulation lines show and the badge gets a ring.
+    #[arg(long, value_name = "MODULE:OUTPUT", requires = "screenshot")]
+    pub pin: Option<Named>,
+    /// Show a cable being wired from this port, as MODULE:PORT (outputs
+    /// first). Its loose end is at --pointer. Over a control that takes
+    /// modulation, the control shows the drop highlight. On a connected
+    /// input, its cable is picked up as in the app: it leaves the input
+    /// and hangs from its source output, and no control is highlighted.
+    #[arg(long, value_name = "MODULE:PORT", requires = "pointer", conflicts_with = "depth")]
+    pub wire: Option<Named>,
+    /// Show the range arc of this knob being dragged, as MODULE:PARAM: only
+    /// the assignment being changed shows on its arc. The assignment is
+    /// picked as in the app: the pinned output's (--pin), then the only
+    /// one from the --focus module, then the only enabled one.
+    #[arg(long, value_name = "MODULE:PARAM", requires = "screenshot")]
+    pub depth: Option<Named>,
 }
 
 impl Default for Options {
@@ -62,6 +89,11 @@ impl Default for Options {
             zoom: None,
             center: None,
             focus: None,
+            pointer: None,
+            hover_text: false,
+            pin: None,
+            wire: None,
+            depth: None,
         }
     }
 }
@@ -119,26 +151,53 @@ impl FromStr for WorldPoint {
     }
 }
 
-/// A control named by module ID and the parameter it is bound to.
+/// A control, port, or parameter named by module ID and name, as
+/// MODULE:NAME.
 #[derive(Debug, Clone, PartialEq)]
-pub struct FocusTarget {
+pub struct Named {
     pub module: u32,
-    pub param: String,
+    pub name: String,
 }
 
-impl FromStr for FocusTarget {
+impl FromStr for Named {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, String> {
-        let (module, param) = s.split_once(':').ok_or("expected MODULE:PARAM, for example 4:cutoff")?;
+        let (module, name) = s.split_once(':').ok_or("expected MODULE:NAME, for example 4:cutoff")?;
         let module = module
             .trim()
             .parse()
             .map_err(|_| format!("`{module}` is not a module ID"))?;
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("the name after `:` is empty".to_string());
+        }
         Ok(Self {
             module,
-            param: param.trim().to_string(),
+            name: name.to_string(),
         })
+    }
+}
+
+/// Where the pointer or the image centre is: a world point, or a named
+/// control or port.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Pointer {
+    World(Point),
+    Named(Named),
+}
+
+impl FromStr for Pointer {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        if s.contains(':') {
+            s.parse().map(Self::Named)
+        } else {
+            s.parse()
+                .map(|p: WorldPoint| Self::World(p.0))
+                .map_err(|_| "expected X,Y or MODULE:NAME, for example 400,300 or 4:cutoff".to_string())
+        }
     }
 }
 
@@ -150,25 +209,62 @@ pub fn run(args: &crate::Args, path: &Path) -> Result<(), String> {
         (None, None) => crate::Source::Empty,
     };
     let config = loom_core::EngineConfig::with_sample_rate(48_000.0);
-    let session = crate::App::session(config, source)?;
-    let scene = crate::scene::build(&session.controller, &session.positions);
-    let mut values = PanelValues::new();
-    crate::scene::update_panel_values(&mut values, &session.controller, &BTreeMap::new());
-
+    let mut session = crate::App::session(config, source)?;
     let options = &args.view;
+    // A wire from a connected input picks up its cable, as in the app: the
+    // cable leaves the patch and its loose end hangs from the source.
+    let wire = match &options.wire {
+        Some(target) => Some(pick_up(&mut session.controller, target)?),
+        None => None,
+    };
+    let controller = &session.controller;
+    let scene = crate::scene::build(controller, &session.positions);
+
     let logical = Size::new(options.size.width as f32, options.size.height as f32);
     let focus = options
         .focus
         .as_ref()
-        .map(|target| find_control(&session.controller, target))
+        .map(|target| find_control(controller, target))
         .transpose()?;
-    let centre = options.center.map(|c| c.0).or_else(|| {
+    let point = |p: &Pointer| match p {
+        Pointer::World(p) => Ok(*p),
+        Pointer::Named(target) => find_point(controller, &scene, target),
+    };
+    let pointer = options.pointer.as_ref().map(point).transpose()?;
+    let pinned = options
+        .pin
+        .as_ref()
+        .map(|t| find_pin(controller, &scene, t))
+        .transpose()?;
+    let depth = options
+        .depth
+        .as_ref()
+        .map(|t| find_control(controller, t))
+        .transpose()?;
+
+    // During an arc drag, the knob's arc shows only the assignment being
+    // changed, as in the app.
+    let dragging = depth
+        .map(|knob| depth_assignment(controller, knob, pinned, focus))
+        .transpose()?;
+    let mut values = PanelValues::new();
+    crate::scene::update_panel_values_dragging(&mut values, controller, &BTreeMap::new(), dragging);
+
+    let centre = options.center.as_ref().map(point).transpose()?.or(pointer).or_else(|| {
         let (module, _) = focus?;
         Some(scene.module(module)?.bounds().center())
     });
     let still = Still {
         camera: camera(&scene, logical, options.zoom, centre),
         focus,
+        pointer,
+        pinned,
+        drag: match (wire, depth) {
+            (Some((from, pulled)), _) => Some(StillDrag::Wire { from, pulled }),
+            (None, Some((module, widget))) => Some(StillDrag::Depth(module, widget)),
+            (None, None) => None,
+        },
+        hover_text: options.hover_text,
     };
     let physical = physical_size(logical, options.scale)?;
     // Tab moves focus within the selected module, so the focused module is
@@ -209,25 +305,137 @@ fn camera(scene: &Scene, size: Size, zoom: Option<f32>, centre: Option<Point>) -
     }
 }
 
+fn descriptor(controller: &Controller, module: u32) -> Result<&'static loom_core::ModuleDescriptor, String> {
+    controller
+        .graph()
+        .node(ModuleId(module))
+        .map(|node| node.descriptor)
+        .ok_or_else(|| format!("no module {module} in the patch"))
+}
+
 /// The widget index of the control bound to a parameter. Panel widgets on
 /// the canvas keep the descriptor's order.
-fn find_control(controller: &Controller, target: &FocusTarget) -> Result<(u32, usize), String> {
-    let node = controller
-        .graph()
-        .node(ModuleId(target.module))
-        .ok_or_else(|| format!("no module {} in the patch", target.module))?;
-    node.descriptor
-        .panel
-        .widgets
-        .iter()
-        .position(|w| w.is_control() && w.bind == target.param)
+fn find_control(controller: &Controller, target: &Named) -> Result<(u32, usize), String> {
+    let descriptor = descriptor(controller, target.module)?;
+    control_index(descriptor, &target.name)
         .map(|index| (target.module, index))
         .ok_or_else(|| {
             format!(
                 "module {} ({}) has no control for parameter `{}`",
-                target.module, node.descriptor.name, target.param
+                target.module, descriptor.name, target.name
             )
         })
+}
+
+fn control_index(descriptor: &loom_core::ModuleDescriptor, param: &str) -> Option<usize> {
+    descriptor
+        .panel
+        .widgets
+        .iter()
+        .position(|w| w.is_control() && w.bind == param)
+}
+
+/// The port with this name. An output wins over an input of the same name.
+fn find_port(controller: &Controller, target: &Named) -> Result<PortRef, String> {
+    let descriptor = descriptor(controller, target.module)?;
+    let index = |ports: &[loom_core::PortSpec]| ports.iter().position(|p| p.name == target.name);
+    let port = |output, index| PortRef {
+        module: target.module,
+        output,
+        index,
+    };
+    index(descriptor.outputs)
+        .map(|i| port(true, i))
+        .or_else(|| index(descriptor.inputs).map(|i| port(false, i)))
+        .ok_or_else(|| {
+            format!(
+                "module {} ({}) has no port `{}`",
+                target.module, descriptor.name, target.name
+            )
+        })
+}
+
+/// The port a wire starts from, and whether it was pulled off an input.
+/// A connected input is disconnected, and the wire starts at the output
+/// that fed it.
+fn pick_up(controller: &mut Controller, target: &Named) -> Result<(PortRef, bool), String> {
+    let port = find_port(controller, target)?;
+    if port.output {
+        return Ok((port, false));
+    }
+    let input = loom_core::InputRef {
+        module: ModuleId(port.module),
+        port: port.index,
+    };
+    match controller.disconnect(input).map_err(|e| e.to_string())? {
+        Some(source) => Ok((
+            PortRef {
+                module: source.module.0,
+                output: true,
+                index: source.port,
+            },
+            true,
+        )),
+        None => Ok((port, false)),
+    }
+}
+
+/// The world point of a named control's centre, or else of a port.
+fn find_point(controller: &Controller, scene: &Scene, target: &Named) -> Result<Point, String> {
+    let descriptor = descriptor(controller, target.module)?;
+    let module = scene.module(target.module).ok_or("module not in the scene")?;
+    if let Some(bounds) = control_index(descriptor, &target.name).and_then(|i| module.widget_bounds(i)) {
+        return Ok(bounds.center());
+    }
+    find_port(controller, target)
+        .and_then(|port| scene.port_position(port).ok_or_else(|| "port not in the scene".into()))
+        .map_err(|_| {
+            format!(
+                "module {} ({}) has no control or port `{}`",
+                target.module, descriptor.name, target.name
+            )
+        })
+}
+
+/// The output to pin. It must have a badge, so at least one assignment.
+fn find_pin(controller: &Controller, scene: &Scene, target: &Named) -> Result<PortRef, String> {
+    let port = find_port(controller, target)?;
+    let badge = scene.module(port.module).and_then(|m| m.badge_bounds(port.index));
+    if !port.output || badge.is_none() {
+        return Err(format!(
+            "module {} has no output `{}` with assignments, so no badge to pin",
+            target.module, target.name
+        ));
+    }
+    Ok(port)
+}
+
+/// The assignment an arc drag on `knob` changes, picked as the app picks
+/// it. The focused module stands in for the selection.
+fn depth_assignment(
+    controller: &Controller,
+    knob: (u32, usize),
+    pinned: Option<PortRef>,
+    focus: Option<(u32, usize)>,
+) -> Result<loom_core::AssignmentId, String> {
+    let (module, widget) = knob;
+    let (param, kind, spec) =
+        crate::scene::control_param(controller, module, widget).ok_or("not a parameter control")?;
+    // Only a knob has a range arc to drag. Toggles, radio buttons, and
+    // buttons set their depth in the inspector.
+    if kind != loom_core::WidgetKind::Knob {
+        return Err(format!(
+            "the control for {module}:{} is not a knob, so it has no range arc to drag",
+            spec.name
+        ));
+    }
+    let pinned = pinned.map(|p| OutputRef {
+        module: ModuleId(p.module),
+        port: p.index,
+    });
+    let selected = focus.map(|(module, _)| ModuleId(module));
+    crate::modulation::drag_target(controller.graph(), ModuleId(module), param, pinned, selected)
+        .map_err(|why| format!("no arc drag on {module}: {why}"))
 }
 
 /// Draws the canvas offscreen and returns its pixels, RGBA, row by row.
@@ -301,20 +509,50 @@ mod tests {
         assert!("640".parse::<ImageSize>().is_err());
         assert!("0x480".parse::<ImageSize>().is_err());
         assert_eq!("10.5,-3".parse::<WorldPoint>(), Ok(WorldPoint(Point::new(10.5, -3.0))));
-        assert_eq!(
-            "4:cutoff".parse::<FocusTarget>(),
-            Ok(FocusTarget {
-                module: 4,
-                param: "cutoff".to_string()
-            })
-        );
-        assert!("cutoff".parse::<FocusTarget>().is_err());
+        let cutoff = Named {
+            module: 4,
+            name: "cutoff".to_string(),
+        };
+        assert_eq!("4:cutoff".parse::<Named>(), Ok(cutoff.clone()));
+        assert!("cutoff".parse::<Named>().is_err());
+        assert!("x:cutoff".parse::<Named>().is_err());
+        assert!("4:".parse::<Named>().is_err());
+        assert_eq!("4:cutoff".parse::<Pointer>(), Ok(Pointer::Named(cutoff)));
+        assert_eq!("10,20".parse::<Pointer>(), Ok(Pointer::World(Point::new(10.0, 20.0))));
+        assert!("10".parse::<Pointer>().is_err());
         assert!("NaN,0".parse::<WorldPoint>().is_err());
         assert!("0,inf".parse::<WorldPoint>().is_err());
         assert_eq!(positive("2"), Ok(2.0));
         for bad in ["0", "-1", "NaN", "inf"] {
             assert!(positive(bad).is_err(), "{bad}");
         }
+    }
+
+    /// The new options parse together, and clap enforces how they combine.
+    #[test]
+    fn parses_state_options() {
+        use clap::Parser;
+        let parse = |args: &[&str]| {
+            crate::Args::try_parse_from([&["loom-app", "p.ron", "--screenshot", "o.png"], args].concat())
+        };
+        let args = parse(&[
+            "--pointer",
+            "4:cutoff",
+            "--pin",
+            "5:out",
+            "--wire",
+            "5:out",
+            "--hover-text",
+        ])
+        .unwrap();
+        assert_eq!(args.view.pin.as_ref().map(|n| n.name.as_str()), Some("out"));
+        assert!(args.view.hover_text);
+        // A wire needs a pointer for its loose end.
+        assert!(parse(&["--wire", "5:out"]).is_err());
+        // One drag at a time.
+        assert!(parse(&["--pointer", "1,1", "--wire", "5:out", "--depth", "4:cutoff"]).is_err());
+        // Without --screenshot, the state options mean nothing.
+        assert!(crate::Args::try_parse_from(["loom-app", "--pin", "5:out"]).is_err());
     }
 
     #[test]

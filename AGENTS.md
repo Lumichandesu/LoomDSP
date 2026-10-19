@@ -33,6 +33,7 @@ cargo run --release -p loom-app -- examples/patches/fm-feedback.ron   # desktop 
 cargo run --release -p loom-app -- --generate 300 --bench            # canvas frame-rate test
 cargo run --release -p loom-app -- examples/patches/subtractive.ron --screenshot /tmp/canvas.png   # canvas to PNG, no window
 cargo run --release -p loom-app -- examples/patches/subtractive.ron --screenshot /tmp/knob.png --zoom 2 --scale 2 --focus 4:cutoff
+cargo run --release -p loom-app -- examples/patches/subtractive.ron --screenshot /tmp/wire.png --zoom 2 --pointer 4:resonance --wire 3:out   # also --hover-text, --pin, --depth
 ```
 
 ## Architecture in one page

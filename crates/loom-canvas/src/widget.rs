@@ -206,9 +206,10 @@ pub struct PatchCanvas<'a, Message> {
     still: Option<Still>,
 }
 
-/// How a still image of the canvas starts: its camera and the control with
-/// keyboard focus. See [`PatchCanvas::still`].
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// How a still image of the canvas starts: its camera, the control with
+/// keyboard focus, the pointer, the pinned badge, and a drag in progress.
+/// See [`PatchCanvas::still`].
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Still {
     /// The view. It replaces the framing the canvas does when it first
     /// appears.
@@ -216,6 +217,38 @@ pub struct Still {
     /// Module ID and widget index of the control with keyboard focus. It
     /// draws as after a Tab press: with the focus ring and its value.
     pub focus: Option<(u32, usize)>,
+    /// Where the pointer is, in world coordinates. What is under it draws
+    /// as hovered: the port ring, the cables and modulation lines in focus,
+    /// and, during a wiring drag, the loose cable end and the drop
+    /// highlight.
+    pub pointer: Option<Point>,
+    /// The output whose badge is pinned, as after a click on the badge.
+    pub pinned: Option<PortRef>,
+    /// A drag in progress.
+    pub drag: Option<StillDrag>,
+    /// Show hover text at once, as if the pointer or the keyboard focus had
+    /// rested for the hover delay. A drag shows none.
+    pub hover_text: bool,
+}
+
+/// A drag that a still image shows in progress. See [`Still::drag`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StillDrag {
+    /// A cable being dragged from a port. Its loose end is at the pointer,
+    /// or on the port under it.
+    Wire {
+        /// The port the cable starts at.
+        from: PortRef,
+        /// True when the cable was pulled off an input: `from` is the
+        /// output it came from, and the scene no longer has the cable. A
+        /// drop on a control then assigns nothing, so no control is
+        /// highlighted.
+        pulled: bool,
+    },
+    /// The range arc of this knob being dragged: module ID and widget
+    /// index. The canvas draws no mark for it. The app shows the arc of
+    /// the assignment being changed through [`PanelValues`].
+    Depth(u32, usize),
 }
 
 /// Where the canvas is in the window and how it looks at the world. The
@@ -504,14 +537,7 @@ where
 
     fn state(&self) -> tree::State {
         let state = match self.still {
-            Some(still) => State {
-                camera: still.camera,
-                // Already framed, so the first redraw keeps this camera.
-                framed_key: Some(self.frame_key),
-                focus: still.focus,
-                tab_focus: still.focus.is_some(),
-                ..State::default()
-            },
+            Some(still) => self.still_state(still),
             None => State::default(),
         };
         tree::State::new(state)
@@ -658,6 +684,42 @@ where
 }
 
 impl<Message> PatchCanvas<'_, Message> {
+    /// The first state for a still image: as if the user had framed the
+    /// view, focused a control with Tab, moved the pointer, pinned a badge,
+    /// and started a drag, in that order.
+    fn still_state(&self, still: Still) -> State {
+        let mut state = State {
+            camera: still.camera,
+            // Already framed, so the first redraw keeps this camera.
+            framed_key: Some(self.frame_key),
+            focus: still.focus,
+            tab_focus: still.focus.is_some(),
+            pinned: still.pinned,
+            ..State::default()
+        };
+        if let Some(world) = still.pointer {
+            state.cursor = Some(world);
+            state.hover = Some(self.scene.hit(world, state.hit_radius()));
+        }
+        state.interaction = match still.drag {
+            Some(StillDrag::Wire { from, pulled }) => Interaction::Wiring { from, pulled },
+            Some(StillDrag::Depth(module, widget)) => Interaction::Depth {
+                module,
+                widget,
+                last_y: still.pointer.map_or(0.0, |p| state.camera.to_screen(p).y),
+            },
+            None => Interaction::Idle,
+        };
+        if still.hover_text {
+            // Start the wait in the past, so the text is due now and shows
+            // in the first frame. One frame cannot wait for the delay.
+            let now = Instant::now();
+            state.hover_text.rest(self.hover_target(&state), now);
+            state.hover_text.tick(now + crate::hover::HOVER_DELAY);
+        }
+        state
+    }
+
     /// Handles one event: everything but hover text.
     fn handle(
         &self,
@@ -3221,6 +3283,62 @@ mod tests {
             text: None,
             repeat: false,
         })
+    }
+
+    /// A still image starts with the pointer, pin, drag, and hover text it
+    /// asks for, all in the first frame (`loom-app --screenshot`).
+    #[test]
+    fn a_still_seeds_pointer_pin_drag_and_hover_text() {
+        let (scene, values) = modulated_scene();
+        let none = BTreeSet::new();
+        let knob = scene.module(2).unwrap().widget_bounds(0).unwrap().center();
+        let still = Still {
+            pointer: Some(knob),
+            pinned: Some(OUT),
+            hover_text: true,
+            ..Still::default()
+        };
+        let canvas = PatchCanvas::new(&scene, &none, |e| e).values(&values).still(still);
+        let state = canvas.still_state(still);
+        assert_eq!(state.hover, Some(Hit::Widget { module: 2, widget: 0 }));
+        assert_eq!(state.pinned, Some(OUT));
+        assert_eq!(state.hover_text.shown(), Some(HoverTarget::Control(2, 0)));
+        assert_eq!(canvas.overlay(&state).cables.len(), 1, "the modulation line");
+
+        // Wiring from the output to the knob: the loose cable and the drop
+        // highlight, and no hover text during a drag.
+        let wiring = Still {
+            drag: Some(StillDrag::Wire {
+                from: OUT,
+                pulled: false,
+            }),
+            pinned: None,
+            ..still
+        };
+        let state = canvas.still_state(wiring);
+        assert!(matches!(
+            state.interaction,
+            Interaction::Wiring {
+                from: OUT,
+                pulled: false
+            }
+        ));
+        assert_eq!(state.hover_text.shown(), None);
+        let overlay = canvas.overlay(&state);
+        assert_eq!(overlay.cables.len(), 2, "the line and the loose cable");
+        let resting = canvas.overlay(&canvas.still_state(Still { drag: None, ..wiring }));
+        assert_eq!(overlay.shapes.len(), resting.shapes.len() + 1, "the drop highlight");
+
+        // A cable pulled off an input assigns nothing on a drop, so the
+        // control is not highlighted.
+        let pulled = canvas.overlay(&canvas.still_state(Still {
+            drag: Some(StillDrag::Wire {
+                from: OUT,
+                pulled: true,
+            }),
+            ..wiring
+        }));
+        assert_eq!(pulled.shapes.len(), resting.shapes.len());
     }
 
     /// Lines show while the pointer is on the source output, its badge, or

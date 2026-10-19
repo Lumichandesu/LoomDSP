@@ -142,7 +142,7 @@ The canvas (`crates/loom-canvas`) must stay fast on high-resolution displays. It
 - Do not add shaders that run over the whole window for each shape.
 - In `canvas.wgsl`, avoid names that are reserved in Metal or HLSL (`half`, `in`, `out`, `sample`, and others). The `shader_names` test checks the list.
 
-To check performance, run `cargo run --release -p loom-app -- --generate 300 --bench` and read the bottom bar. Results and the method are in [docs/benchmarks/p1-canvas.md](docs/benchmarks/p1-canvas.md). For UI changes, add a screenshot to the pull request. `loom-app <patch> --screenshot out.png` saves one without a window; `--zoom`, `--center`, `--scale`, and `--focus` set what it shows (see `loom-app --help`).
+To check performance, run `cargo run --release -p loom-app -- --generate 300 --bench` and read the bottom bar. Results and the method are in [docs/benchmarks/p1-canvas.md](docs/benchmarks/p1-canvas.md). For UI changes, add a screenshot to the pull request. `loom-app <patch> --screenshot out.png` saves one without a window; `--zoom`, `--center`, `--scale`, and `--focus` set what it shows (see `loom-app --help`). Other options show a state that would need a person at the screen: `--pointer` puts the pointer on a point or a named control or port, `--hover-text` shows its hover text at once, `--pin` pins an output's modulation badge, `--wire` shows a cable being dragged to the pointer, and `--depth` shows a knob's range arc being dragged.
 
 ## Dependencies
 
