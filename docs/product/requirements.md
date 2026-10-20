@@ -148,7 +148,7 @@ LoomDSP is a grid for building living musical systems: patches that play, evolve
 |---|---|---|---|---|
 | FR-VIS-01 | Ports show whether they carry signal, as a steady state updated a few times a second. Cables do not pulse or change brightness with the signal. | Should | P1 | Shows where signal flows without constant motion, which tires the eyes and hides what matters. |
 | FR-VIS-02 | A scope module, plus a one-step "Add scope" on any cable or output that places one already connected. | Must | P1 | Core debugging tool. As a module it saves with the patch and can go on a front panel (ADR-0013). |
-| FR-VIS-03 | Spectrum analyser and level meter modules. | Should | P2 | Common sound design need. |
+| FR-VIS-03 | Spectrum analyser and level meter modules. | Should | P1 (level meter), P2 (spectrum) | Common sound design need. |
 | FR-VIS-04 | Visual data reaches the UI without blocking the audio thread and without allocation. | Must | P1 | See NFR-RT-01. |
 | FR-VIS-05 | The app estimates the range each port receives or sends, from cables, parameters, and nominal ranges, and shows it in the inspector. It warns about likely mistakes, such as a gate input that never goes above 0.5, without blocking anything. | Could | P2 | Shows what a cable carries without a scope, and teaches why a patch misbehaves ([port ranges](../design/port-ranges.md)). |
 

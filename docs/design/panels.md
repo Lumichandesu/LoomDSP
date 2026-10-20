@@ -119,7 +119,8 @@ The inspector stays, as the place for:
 
 - every parameter, including those not on the tile;
 - typing exact values;
-- modulation ranges, MIDI learn, and other settings that do not fit on a control.
+- modulation ranges and other settings that do not fit on a control;
+- MIDI mappings. Learn mode can arm controls on tiles or in the inspector. The inspector shows each mapping and can remove it.
 
 ### Removing an item
 
@@ -394,5 +395,4 @@ What P1 builds. The rest of this spec is P2.
 
 - Can users restyle a built-in module's panel, or only their own sub-patches?
 - How third-party modules add display kinds through the SDK.
-- The exact format of display values: how many per module, and whether they share the meter queue or use a latest-value buffer.
 - How a sub-patch tile looks before its panel has been designed. Leaning: its exposed parameters as knobs, in order.

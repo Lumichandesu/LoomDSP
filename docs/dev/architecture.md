@@ -63,9 +63,13 @@ Every arrow into or out of the audio thread is a bounded, lock-free queue (`rtrb
 
 Telemetry for live views also leaves the audio thread through bounded queues: one for meter readings and one for scope samples. The app asks to watch an output port with `Controller::add_probe`. When a telemetry queue is full, the engine drops the new message and counts it; it never waits (NFR-RT-07). Details are in the [telemetry specification](../design/telemetry.md).
 
+Module display values use a separate path. After each block, a module can publish up to four values to a fixed latest-value table. The controller exposes it through `DisplayReader`. The light watcher (`crates/loom-app/src/lights.rs`) reads values for visible lights on its own thread every 33 ms. It sends the first reading, then wakes the UI only when a light's drawn brightness changes. The telemetry thread (`crates/loom-app/src/monitor.rs`) drains meter readings. It empties the scope queue while no scope display is active and sends meter updates only when the drawn level changes. See the [panels specification](../design/panels.md) and [telemetry specification](../design/telemetry.md).
+
 The patch transport (tempo, time signature, running, position) lives in the engine, not in the schedule, so editing the patch never moves it ([ADR-0015](../adr/0015-one-transport-per-patch.md)). The controller changes it with commands, applied at buffer starts. At the start of each block the engine fills one shared buffer per transport signal that some unconnected input follows, such as bar phase. Details are in the [clock and transport specification](../design/clock.md).
 
 MIDI inputs and the Hold note button share one queue through a mutex (`SharedMidi`). Only the sending threads take that lock. The audio thread reads the queue without one.
+
+MIDI mappings are compiled into the schedule. The engine applies mapped control changes and writes their mapping IDs, values, and sequence numbers to a fixed atomic table. It has one entry per channel and controller. `Controller::sync_midi` reads the values back into the graph. Sequence numbers and screen-edit tokens stop an older MIDI change from overwriting a newer edit. The MIDI learn watcher (`crates/loom-app/src/learn.rs`) reads the last control change recorded by the engine. Learn mode can arm a control on a tile or in the inspector. See the [MIDI learn specification](../design/midi-learn.md).
 
 ## Life of an edit
 
@@ -90,6 +94,8 @@ The same path carries every structural edit: add, remove, connect, disconnect. P
 | GPU data | `gpu.rs` | Turns a scene into instances: one rounded rectangle per tile, header, and port, and one entry per cable. Uploaded only when the generation changes. |
 | Shaders | `canvas.wgsl` | Rounded rectangles shade only their own pixels. Cables are curves built in the vertex shader. Pan and zoom change one small uniform buffer, which also holds the opacity of cables that are not in focus. |
 | Widget | `widget.rs` | Mouse and keyboard handling, and the per-frame overlay: selection and hover outlines, and the cables of selected and hovered modules drawn in front. Text goes through Iced and is skipped when too small to read. |
+
+Live panel values use a separate `PanelValues` cache in `controls.rs`. Its generation changes only when a value changes. The canvas builds control GPU instances in a separate cache keyed by scene and value generations, so moving a knob does not rebuild tile, port, or cable geometry.
 
 Without the app's Measure toggle, the window redraws only when something changes.
 
