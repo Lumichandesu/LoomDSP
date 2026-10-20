@@ -5,6 +5,8 @@
 //! canvas against the performance gates in NFR-PERF-04.
 
 mod alerts;
+#[cfg(test)]
+mod autosave_tests;
 mod bench;
 mod browser;
 mod clipboard;
@@ -18,6 +20,7 @@ mod live;
 mod modulation;
 mod monitor;
 mod param;
+mod recovery;
 mod scene;
 mod screenshot;
 mod snapshot;
@@ -83,6 +86,13 @@ struct Args {
     /// Repeat to select several.
     #[arg(long, value_name = "MODULE", requires = "dump_ui")]
     select: Vec<u32>,
+    /// Keep autosave recovery copies in this folder instead of the
+    /// per-user one (docs/design/autosave.md). For tests and scripts.
+    #[arg(long, value_name = "FOLDER", conflicts_with = "no_recovery")]
+    recovery_dir: Option<PathBuf>,
+    /// No autosave and no crash recovery for this run.
+    #[arg(long)]
+    no_recovery: bool,
 }
 
 impl Args {
@@ -92,6 +102,22 @@ impl Args {
             (_, Some(n)) => Source::Generated(n),
             (Some(path), None) => Source::File(path),
             (None, None) => Source::Empty,
+        }
+    }
+
+    /// Where this run keeps recovery copies, or `None` when it keeps none:
+    /// with --no-recovery, and in runs nobody watches, which must not stop
+    /// at a dialog or use up a user's copy (`docs/design/autosave.md`).
+    fn recovery_root(&self) -> Option<Result<PathBuf, String>> {
+        let unattended = self.no_recovery || !self.control.listeners().is_empty() || self.bench.reporter().is_some();
+        if unattended {
+            return None;
+        }
+        match &self.recovery_dir {
+            Some(dir) => Some(Ok(dir.clone())),
+            // Tests never touch the real folder.
+            None if cfg!(test) => None,
+            None => Some(recovery::default_root()),
         }
     }
 }
@@ -174,6 +200,8 @@ enum Message {
         module: u32,
         index: usize,
     },
+    /// Time to check whether a recovery copy is due.
+    Autosave,
     /// Remove a parameter's MIDI mapping.
     Unmap {
         module: u32,
@@ -249,6 +277,17 @@ struct App {
     name: String,
     /// The file the patch was opened from or saved to (`docs/design/files.md`).
     file: Option<PathBuf>,
+    /// The file's time and size when it was last opened or saved.
+    stamp: Option<recovery::Stamp>,
+    /// The title's name for a patch with no file, when it is not
+    /// "Untitled": a restored copy whose file changed.
+    shown_name: Option<String>,
+    /// The patch as it was last opened or saved, to tell unsaved work
+    /// apart. `None` when nothing on disk holds this patch (a restored copy).
+    saved_content: Option<Patch>,
+    /// This run's recovery folder (`docs/design/autosave.md`). `None` when
+    /// autosave is off.
+    recovery: Option<recovery::Session>,
     /// Counts the engines built. Background watchers restart when it changes.
     generation: u64,
     sample_rate: f32,
@@ -339,6 +378,8 @@ enum Source<'a> {
     Empty,
     Generated(usize),
     File(&'a Path),
+    /// A recovery copy (`docs/design/autosave.md`).
+    Recovered(Box<Patch>),
 }
 
 /// An engine and the patch loaded into it, before audio is attached.
@@ -350,13 +391,67 @@ struct Session {
     positions: BTreeMap<u32, Point>,
     name: String,
     file: Option<PathBuf>,
+    stamp: Option<recovery::Stamp>,
 }
 
 impl App {
     fn new(args: Args) -> Self {
+        Self::boot(args, &mut recovery::Dialogs)
+    }
+
+    /// Starts the app: opens this run's recovery folder, offers a copy left
+    /// by a crash, then opens the patch (`docs/design/autosave.md`).
+    fn boot(args: Args, prompt: &mut dyn recovery::Prompt) -> Self {
+        let mut notes = Vec::new();
+        let mut session_folder = None;
+        let mut restore = None;
+        if let Some(root) = args.recovery_root() {
+            match root.and_then(|root| recovery::start(&root)) {
+                Ok(startup) => {
+                    session_folder = Some(startup.session);
+                    if let Some(orphan) = startup.orphan {
+                        match prompt.ask(&orphan) {
+                            recovery::Choice::Restore => restore = Some(orphan),
+                            recovery::Choice::Discard => {
+                                if let Err(e) = orphan.discard() {
+                                    notes.push(format!("Could not delete the recovery copy: {e}."));
+                                }
+                            }
+                            recovery::Choice::NotNow => {}
+                            recovery::Choice::Unavailable => notes.push(format!(
+                                "Unsaved changes from a crash were kept. Install zenity or kdialog to restore them, or open {}.",
+                                orphan.patch_path().display()
+                            )),
+                        }
+                    }
+                }
+                Err(e) => notes.push(format!("Autosave is off: {e}.")),
+            }
+        }
+        // The file is checked after the answer: it can change while the
+        // question is open.
+        let mut restore_failed = false;
+        let recovered = restore.and_then(|orphan| match orphan.load() {
+            Ok(patch) => Some((orphan.file_state(), orphan, patch)),
+            Err(e) => {
+                let message = format!(
+                    "Could not restore the unsaved changes: {e}. The copy is kept at {}.",
+                    orphan.patch_path().display()
+                );
+                prompt.error(&message);
+                notes.push(message);
+                restore_failed = true;
+                None
+            }
+        });
+
         let output = Self::open_output(args.no_audio, args.fake_audio, args.record.as_deref());
         let sample_rate = output.as_ref().map(|o| o.sample_rate() as f32).unwrap_or(48_000.0);
-        let source = args.source();
+        let source = match &recovered {
+            Some((_, _, patch)) => Source::Recovered(Box::new(patch.clone())),
+            None if restore_failed => Source::Empty,
+            None => args.source(),
+        };
         let mut status = String::new();
         let config = EngineConfig {
             output_safety: args.output_safety,
@@ -367,10 +462,83 @@ impl App {
             Self::session(config, Source::Empty).expect("an empty patch always loads")
         });
         let mut app = Self::assemble(output, sample_rate, session, 1, &args, true);
-        if !status.is_empty() {
+        // The compile report gives way to anything that needs reading.
+        let mut keep = !status.is_empty();
+        if keep {
             app.status = status;
         }
+        app.recovery = session_folder;
+        if let Some((state, orphan, _)) = recovered {
+            app.restored(state, orphan, &args);
+            keep = true;
+        }
+        if !notes.is_empty() {
+            if keep {
+                notes.insert(0, std::mem::take(&mut app.status));
+            }
+            app.status = notes.join(" ");
+        }
         app
+    }
+
+    /// Sets up a patch restored from a recovery copy (autosave.md, After a
+    /// restore): marked unsaved, with its file only if that is unchanged.
+    fn restored(&mut self, state: recovery::FileState, orphan: recovery::Orphan, args: &Args) {
+        match state {
+            recovery::FileState::Unchanged(path) => {
+                self.stamp = recovery::Stamp::of(&path);
+                self.file = Some(path);
+            }
+            recovery::FileState::Changed(path) | recovery::FileState::Missing(path) => {
+                let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned());
+                self.shown_name = Some(format!("{} (recovered)", stem.as_deref().unwrap_or("Untitled")));
+            }
+            recovery::FileState::NeverSaved => {}
+        }
+        // Nothing on disk holds this patch.
+        self.history.clear();
+        self.saved_content = None;
+        let when = recovery::local_time(orphan.written());
+        self.status = match args.source() {
+            Source::File(path) => format!(
+                "Restored unsaved changes from {when}. {} was not opened.",
+                files::display_name(Some(path))
+            ),
+            _ => format!("Restored unsaved changes from {when}."),
+        };
+        if let Some(session) = &mut self.recovery {
+            session.adopt(orphan);
+        }
+        // This session's own copy, at once: the orphan goes when it is on disk.
+        self.autosave(Instant::now());
+    }
+
+    /// The patch as it would be saved now.
+    fn current_patch(&self) -> Patch {
+        let mut patch = Patch::from_graph(&self.name, self.controller.graph());
+        for m in &mut patch.modules {
+            m.position = self.positions.get(&m.id).map(|p| (p.x.round(), p.y.round()));
+        }
+        patch
+    }
+
+    /// Writes or deletes the recovery copy when one is due
+    /// (`docs/design/autosave.md`). Runs on a timer and after save, open,
+    /// and new.
+    fn autosave(&mut self, now: Instant) {
+        if self.recovery.is_none() {
+            return;
+        }
+        let current = self.current_patch();
+        let target = (self.saved_content.as_ref() != Some(&current)).then_some(current);
+        let (file, stamp) = (self.file.clone(), self.stamp);
+        let Some(session) = &mut self.recovery else { return };
+        let lines = session.tick(now, target, || {
+            recovery::Info::new(file.as_deref(), stamp, std::time::SystemTime::now())
+        });
+        if let Some(line) = lines.into_iter().last() {
+            self.status = line;
+        }
     }
 
     fn open_output(no_audio: bool, fake_audio: bool, record: Option<&Path>) -> Result<AudioOutput, String> {
@@ -397,23 +565,30 @@ impl App {
             telemetry,
         } = create_engine(loom_modules::registry(), config);
         let mut positions = BTreeMap::new();
-        let (name, file) = match source {
+        let mut load = |patch: &Patch, controller: &mut Controller| -> Result<String, String> {
+            patch.load_into(controller).map_err(|e| e.to_string())?;
+            for m in &patch.modules {
+                if let Some((x, y)) = m.position {
+                    positions.insert(m.id, Point::new(x, y));
+                }
+            }
+            Ok(patch.name.clone())
+        };
+        let (name, file, stamp) = match source {
             Source::Generated(n) => {
                 layout::generate(&mut controller, n).map_err(|e| format!("generate failed: {e}"))?;
                 layout::generated_layout(&controller, &mut positions);
-                (format!("Generated ({n} modules)"), None)
+                (format!("Generated ({n} modules)"), None, None)
             }
             Source::File(path) => {
+                // Stamped before reading: a change after this shows as a change.
+                let stamp = recovery::Stamp::of(path);
                 let patch = Patch::load(path).map_err(|e| e.to_string())?;
-                patch.load_into(&mut controller).map_err(|e| e.to_string())?;
-                for m in &patch.modules {
-                    if let Some((x, y)) = m.position {
-                        positions.insert(m.id, Point::new(x, y));
-                    }
-                }
-                (patch.name.clone(), Some(path.to_path_buf()))
+                let name = load(&patch, &mut controller)?;
+                (name, Some(path.to_path_buf()), stamp)
             }
-            Source::Empty => ("Untitled".to_string(), None),
+            Source::Recovered(patch) => (load(&patch, &mut controller)?, None, None),
+            Source::Empty => ("Untitled".to_string(), None, None),
         };
         layout::auto_layout(&controller, &mut positions);
         Ok(Session {
@@ -424,6 +599,7 @@ impl App {
             positions,
             name,
             file,
+            stamp,
         })
     }
 
@@ -445,6 +621,7 @@ impl App {
             positions,
             name,
             file,
+            stamp,
         } = session;
         let mut status = String::new();
 
@@ -494,6 +671,10 @@ impl App {
             selection: BTreeSet::new(),
             name,
             file,
+            stamp,
+            shown_name: None,
+            saved_content: None,
+            recovery: None,
             generation,
             sample_rate,
             no_audio: args.no_audio,
@@ -548,6 +729,7 @@ impl App {
         };
         // A patch just loaded is the one on disk.
         app.history.mark_saved();
+        app.saved_content = Some(app.current_patch());
         if app.status.is_empty() {
             app.report();
         }
@@ -562,15 +744,17 @@ impl App {
     /// Writes the patch to `path`. On success the path becomes the current
     /// file and the unsaved mark clears.
     fn write_to(&mut self, path: PathBuf) -> bool {
-        let mut patch = Patch::from_graph(&self.name, self.controller.graph());
-        for m in &mut patch.modules {
-            m.position = self.positions.get(&m.id).map(|p| (p.x.round(), p.y.round()));
-        }
+        let patch = self.current_patch();
         match patch.save(&path) {
             Ok(()) => {
                 self.status = format!("saved {}", path.display());
+                self.stamp = recovery::Stamp::of(&path);
                 self.file = Some(path);
+                self.shown_name = None;
                 self.history.mark_saved();
+                self.saved_content = Some(patch);
+                // The file holds the work now: the copy goes.
+                self.autosave(Instant::now());
                 true
             }
             Err(e) => {
@@ -688,11 +872,15 @@ impl App {
             view: screenshot::Options::default(),
             dump_ui: false,
             select: Vec::new(),
+            recovery_dir: None,
+            no_recovery: true,
         };
         let mut fresh = Self::assemble(output, sample_rate, session, self.generation + 1, &args, true);
         fresh.animating = self.animating;
         fresh.reporter = self.reporter.take();
         fresh.control = std::mem::take(&mut self.control);
+        // The session goes on; only its patch changed.
+        fresh.recovery = self.recovery.take();
         // Commands waiting to be drawn still get their answer.
         fresh.control_pending = std::mem::take(&mut self.control_pending);
         // The canvas keeps its state across the rebuild and compares these
@@ -701,6 +889,8 @@ impl App {
         fresh.browser_key = self.browser_key;
         fresh.frame_key = self.frame_key + 1;
         *self = fresh;
+        // The new patch has no unsaved changes: the copy goes.
+        self.autosave(Instant::now());
         true
     }
 
@@ -732,7 +922,10 @@ impl App {
     }
 
     fn title(&self) -> String {
-        files::window_title(self.file.as_deref(), self.unsaved())
+        match (&self.file, &self.shown_name) {
+            (None, Some(name)) => files::titled(name, self.unsaved()),
+            _ => files::window_title(self.file.as_deref(), self.unsaved()),
+        }
     }
 
     fn theme(&self) -> Theme {
@@ -771,6 +964,10 @@ impl App {
                 self.control_waiting()
                     .then(|| iced::window::frames().map(|_| Message::ControlFrame)),
             );
+        let autosave = match &self.recovery {
+            Some(_) => iced::time::every(recovery::TICK).map(|_| Message::Autosave),
+            None => Subscription::none(),
+        };
         let report = match &self.reporter {
             Some(reporter) => Subscription::run_with(reporter.clone(), bench::stream).map(|()| Message::BenchDone),
             None => Subscription::none(),
@@ -784,6 +981,7 @@ impl App {
                 self.midi_watch(),
                 close,
                 report,
+                autosave,
             ]
             .into_iter()
             .chain(control),
@@ -1317,6 +1515,10 @@ impl App {
             // ends, and leave no control socket behind.
             self._audio = None;
             control::close(&self.control);
+            // A clean exit: the recovery folder goes (autosave.md, Clean exit).
+            if let Some(session) = self.recovery.take() {
+                session.finish();
+            }
             Task::batch([task, iced::exit()])
         } else if !was_open && self.browser.is_some() {
             Task::batch([task, browser::Browser::focus()])
@@ -1499,6 +1701,7 @@ impl App {
                 self.update_dropouts(now);
             }
             Message::LiveFrame => scene::update_live_values(&mut self.values, &self.controller),
+            Message::Autosave => self.autosave(Instant::now()),
             Message::Tick => {
                 self.controller.collect_garbage();
                 self.update_dropouts(Instant::now());
@@ -2106,6 +2309,8 @@ mod tests {
             view: screenshot::Options::default(),
             dump_ui: false,
             select: Vec::new(),
+            recovery_dir: None,
+            no_recovery: false,
         }
     }
 

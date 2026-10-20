@@ -3,13 +3,13 @@
 The desktop app keeps a recovery copy of the open patch while it has unsaved changes, and after a crash it offers to bring that copy back.
 
 - **Kind:** living specification.
-- **Status:** Agreed
+- **Status:** Implemented
 - **Decision behind it:** none of its own. Builds on [ADR-0008](../adr/0008-patch-format-ron.md) (the patch format) and [Open, Save, and Save As](files.md), which leaves autosave and crash recovery out of its scope.
 - **Use case and requirements:** NFR-REL-01 (the app autosaves and recovers after a crash), UC3 (perform live).
 - **Background:** none.
 - **Prior art:** most desktop editors keep a hidden copy of unsaved work and offer it after a crash. We use only that convention: a quiet background copy, and a question at the next start.
 - **Issues:** [#15](https://github.com/brylie/LoomDSP/issues/15).
-- **Code:** none yet. It will live in `crates/loom-app` (a new `recovery.rs`), next to `files.rs`. It reuses `Patch::from_graph` and `Patch::save` from `loom-patch`, and finds the folders with the `etcetera` crate.
+- **Code:** `crates/loom-app/src/recovery.rs` (folders, locks, the writer thread, the schedule, the offer), and `App::boot`, `App::restored`, and `App::autosave` in `main.rs`. It reuses `Patch::from_graph` and `Patch::save` from `loom-patch`, finds the folders with `etcetera`, and formats times with `jiff`. Tests: `recovery/tests.rs` and `autosave_tests.rs`.
 
 <!-- Spec first: agree on this before building. Keep it true as the code is
      built. See README.md in this folder. -->
@@ -124,7 +124,7 @@ A clean exit deletes the session's own folder, as the last thing it does. So a f
 
 ### The offer at start
 
-When there is an orphan with a recovery copy, the app shows a question after the window opens and before it loads any patch:
+When there is an orphan with a recovery copy, the app shows a question at start, before the window opens and before it loads any patch:
 
 > **Restore unsaved changes to "drone.ron"?**
 > LoomDSP did not close properly. A copy of your unsaved changes from 20 October, 14:31 was kept.
@@ -140,11 +140,13 @@ For a patch never saved, the name is `Untitled`. The time is `written`, in local
 
 *Why Not Now:* on stage, the player may want to start a known patch fast and look at the lost one later. Discard is final; Not Now is the safe default when unsure.
 
+*Why before the window:* the window then opens on the patch the player chose, never first on an empty or older one.
+
 If the window is closed or the dialog cannot be shown, the result is **Not Now**. On Linux without `zenity` or `kdialog` (see [files.md](files.md#asking-before-losing-work)), the status bar says: `Unsaved changes from a crash were kept. Install zenity or kdialog to restore them, or open <path to patch.ron>.` *Why:* nothing is ever deleted without the user's choice.
 
 **Several orphans** (two instances crashed, or the user chose Not Now before): the app asks about the newest one only. The others stay for later starts. *Why:* one window holds one patch, so one restore per start is all the app can do. A list would be a larger design (see Later).
 
-**A patch path on the command line:** the offer still comes first. Restore replaces the command-line patch, and the status bar says so. The other two choices load the command-line patch as usual. *Why:* the player who restarts after a crash usually starts the app the same way as before, and the copy has more recent work.
+**A patch path on the command line:** the offer still comes first. Restore replaces the command-line patch, and the status bar says so: `Restored unsaved changes from 20 October, 14:31. drone.ron was not opened.` The other two choices load the command-line patch as usual. *Why:* the player who restarts after a crash usually starts the app the same way as before, and the copy has more recent work.
 
 **Non-interactive runs** never ask and never touch other sessions' folders: `--screenshot`, `--dump-ui`, `--bench`, `--measure`, `--measure-idle`, `--control`, `--control-script`, and `--no-recovery`. They also write no recovery copy. *Why:* scripts and tests must not stop at a dialog, and must not use up or delete a real user's recovery copy.
 
@@ -174,6 +176,7 @@ If `file` no longer exists, the question adds: `"drone.ron" no longer exists.` R
 | Had a file, file changed or missing | None | Set | `* drone (recovered) - LoomDSP` |
 | Never saved | None | Set | `* Untitled - LoomDSP` |
 
+- The status bar says `Restored unsaved changes from 20 October, 14:31.`
 - The patch is **always marked unsaved**. *Why:* it differs from what is on disk, or there is nothing on disk. The mark tells the player to save it.
 - It **keeps its file path** only when the file is unchanged since the copy's session last touched it. Then Save writes the recovered work where the player expects. Otherwise there is no current file, and Save acts as Save As, starting in the file's folder.
 - The undo history is empty. *Why:* the history is not saved in the copy. The patch counts as changed, as after `History::clear` ([files.md](files.md#what-counts-as-an-unsaved-change)).
@@ -187,9 +190,9 @@ If `file` no longer exists, the question adds: `"drone.ron" no longer exists.` R
 1. On the UI thread, the app builds the patch data with `Patch::from_graph` and the module positions, as Save does. This is a copy of plain data and is fast.
 2. It sends that data to a **recovery writer thread**: one plain `std::thread` that the app starts with the session and stops at exit. The channel holds one pending copy. A newer copy replaces an older one that the writer has not started.
 3. The writer turns the patch into RON text and writes `patch.ron` through `Patch::save` (a temporary file and a rename, so a crash during the write leaves the old copy whole), then `info.ron` the same way.
+4. The writer sends the result back to the UI thread, which reads it at its next check.
 
 **`patch.ron` and `info.ron` always belong to the same patch.** The writer deletes them together whenever the copy is deleted (a save, New, Open, Don't Save), `info.ron` first, then `patch.ron`. Their content only changes together at those moments: between them, a new write changes `patch.ron` and only the `written` time in `info.ron`. So after a crash the folder holds a matching pair, `patch.ron` alone, or `info.ron` alone. `patch.ron` without `info.ron`, or with an `info.ron` that does not parse, is offered as a patch never saved, with no current file and the time of `patch.ron` itself. `info.ron` without `patch.ron` is an orphan with no copy, and is deleted. *Why:* a crash between the two writes must never pair a new patch with an old file path, because Save would then overwrite the wrong file.
-4. The writer sends the result back to the UI thread as a message.
 
 *Why a thread of its own:* file writes can block for a long time on a slow or network disk, and the UI thread must keep drawing. The audio thread is never involved (hard rule 1). *Why latest wins:* only the newest copy matters. A queue of old copies would only delay it.
 
@@ -258,7 +261,7 @@ Tests point `--recovery-dir` (or the function behind it) at a temporary folder. 
 - [ ] On clean exit, and on exit after Don't Save, the session folder is deleted.
 - [ ] Given a write that does not finish (a writer blocked by the test), when the window closes, then the app exits within 2.5 s and the session folder is left for the next start.
 - [ ] Given an orphan whose current file has the same modification time but a different size, then the offer carries the "has changed" line. Given a file that changes while the question is open, then after Restore there is no current file.
-- [ ] Given the default paths, then on each OS the folder matches the table in Where the recovery copy lives. (Unit test of the path function, with the environment variables set by the test.)
+- [ ] Given the default paths, then on each OS the folder matches the table in Where the recovery copy lives. (Unit test of the path function against the environment variables the app reads. The test reads them and does not set them: setting environment variables while other tests run is unsound.)
 - [ ] With a 300-module patch (`--generate 300`), building the copy on the UI thread takes under 1 ms (benchmark, in [p1-canvas.md](../benchmarks/p1-canvas.md) or its own note).
 - [ ] **Manual check.** On macOS, Windows, and Linux: make changes, wait 3 s, kill the app with the OS (Activity Monitor, Task Manager, `kill -9`). Start it again: the offer appears, Restore brings back the changes, and the title shows the unsaved mark.
 - [ ] **Manual check.** On a slow disk (a network share or USB stick as `--recovery-dir`), turning a knob continuously for 30 s keeps the canvas responsive.

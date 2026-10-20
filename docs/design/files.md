@@ -63,7 +63,7 @@ New, Open, closing the window, and quitting from the OS menu all ask when there 
 - **Don't Save:** continues without saving.
 - **Cancel:** stops the command.
 
-Quit from the OS menu is the same as closing the window. The app handles the window's close request. A quit that does not reach the app as a close request (for example Cmd+Q on macOS, if the window system skips it) cannot ask: check this by hand. On Linux the question needs `zenity` or `kdialog` (the portal backend does not draw message boxes). Without one, the app does not continue: it keeps the patch and the status bar says to save first. A crash or a forced kill cannot ask. [Autosave and crash recovery](autosave.md) will cover that case; it is specified but not built yet.
+Quit from the OS menu is the same as closing the window. The app handles the window's close request. A quit that does not reach the app as a close request (for example Cmd+Q on macOS, if the window system skips it) cannot ask: check this by hand. On Linux the question needs `zenity` or `kdialog` (the portal backend does not draw message boxes). Without one, the app does not continue: it keeps the patch and the status bar says to save first. A crash or a forced kill cannot ask; [autosave and crash recovery](autosave.md) cover that case.
 
 ### Open replaces the patch
 

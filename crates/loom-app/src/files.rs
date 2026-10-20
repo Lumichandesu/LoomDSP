@@ -29,7 +29,12 @@ pub fn display_name(file: Option<&Path>) -> String {
 
 /// The window title: `* name - LoomDSP` with unsaved changes.
 pub fn window_title(file: Option<&Path>, unsaved: bool) -> String {
-    format!("{}{} - LoomDSP", if unsaved { "* " } else { "" }, display_name(file))
+    titled(&display_name(file), unsaved)
+}
+
+/// The window title for a patch shown under `name`.
+pub fn titled(name: &str, unsaved: bool) -> String {
+    format!("{}{name} - LoomDSP", if unsaved { "* " } else { "" })
 }
 
 /// `path` with the patch extension added when it has none.
@@ -120,7 +125,7 @@ pub fn confirm_discard(name: &str) -> Choice {
 
 /// False on Linux when no program that draws message boxes is installed.
 /// Then the dialog would return "cancel" without showing anything.
-fn dialogs_available() -> bool {
+pub fn dialogs_available() -> bool {
     if !cfg!(target_os = "linux") {
         return true;
     }

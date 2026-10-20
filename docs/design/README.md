@@ -71,6 +71,6 @@ Copy [template.md](template.md). Keep it to one feature. Link the ADR, requireme
 | [Module browser](module-browser.md) | None (builds on [ADR-0010](../adr/0010-own-patch-canvas.md)) | Implemented, P1 |
 | [Copy, paste, and duplicate](clipboard.md) | None (builds on [ADR-0008](../adr/0008-patch-format-ron.md)) | Implemented, P1 |
 | [Output safety](output-safety.md) | [ADR-0019](../adr/0019-output-safety-stage.md) | Implemented, P1 |
-| [Autosave and crash recovery](autosave.md) | None (builds on [ADR-0008](../adr/0008-patch-format-ron.md) and [files](files.md)) | Agreed, P1 |
+| [Autosave and crash recovery](autosave.md) | None (builds on [ADR-0008](../adr/0008-patch-format-ron.md) and [files](files.md)) | Implemented, P1 |
 | [App preferences](preferences.md) | None (builds on [ADR-0019](../adr/0019-output-safety-stage.md)) | Draft, P1 |
 | [Control channel](control-channel.md) | None (builds on [ADR-0021](../adr/0021-plain-data-view-models-and-keyed-identity.md)) | Implemented, developer tooling |

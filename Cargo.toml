@@ -63,6 +63,10 @@ iced_runtime = "0.14"
 bytemuck = { version = "1", features = ["derive"] }
 # PNG files for `loom-app --screenshot`.
 png = "0.18"
+# Per-user folders for autosave recovery copies (docs/design/autosave.md).
+etcetera = "0.11"
+# Recovery copy timestamps, shown in local time.
+jiff = "0.2"
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 
 [workspace.lints.rust]
